@@ -262,7 +262,8 @@ resizeObserver.observe($('arena'));
 
 function frame(now: number): void {
   const wallDt = Math.max(0, (now - previous) / 1000);
-  const dt = Math.min(wallDt, 0.05);
+  // Simulation substeps preserve the pace at low FPS; cap long stalls to avoid a catch-up burst.
+  const dt = Math.min(wallDt, 0.25);
   previous = now;
   const phase = simulation.state.phase;
   const events = simulation.step(dt, input);
@@ -271,7 +272,8 @@ function frame(now: number): void {
   if (events.some((event) => event.type === 'hurt')) damageTime = 0.35;
   damageTime = Math.max(0, damageTime - dt);
   $('damage').style.opacity = String(damageTime / 0.35);
-  world.render(simulation.state, input.aim, phase === 'paused' ? 0 : dt);
+  // Keep newly emitted flashes visible for at least one rendered frame.
+  world.render(simulation.state, input.aim, phase === 'paused' ? 0 : Math.min(dt, 0.05));
   uiAccumulator += dt;
   if (uiAccumulator >= 0.1 || phase !== simulation.state.phase) {
     updateUI();
