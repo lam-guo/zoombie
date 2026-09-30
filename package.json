@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "test:soak": "node tests/soak.mjs"
+    "test:soak": "node tests/soak.mjs",
+    "test:campaign": "node tests/campaign.mjs"
   },
   "dependencies": {
     "three": "0.186.1"
