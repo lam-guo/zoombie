@@ -8,7 +8,10 @@ const errors = [];
 const samples = [];
 let server;
 let browser;
-let restarts = 0;
+let retries = 0;
+let clearedLevels = 0;
+let victories = 0;
+let highestLevel = 1;
 let finishedShots = 0;
 let finishedKills = 0;
 let finishedElapsed = 0;
@@ -34,6 +37,10 @@ try {
   inspectUrl.searchParams.set('inspect', '');
   await page.goto(inspectUrl.href);
   await page.waitForFunction(() => Boolean(window.__game));
+  const definitions = await page.evaluate(async () => {
+    const { LEVELS, WEAPONS, RULES, levelTotal } = await import('/src/game/types.ts');
+    return { totals: LEVELS.map(levelTotal), weapons: WEAPONS, rules: RULES };
+  });
   await page.getByRole('button', { name: '进入战斗' }).click();
   const started = Date.now();
   let nextSample = started;
@@ -52,10 +59,16 @@ try {
       return { state, target: nearest ? window.__game.project(nearest) : null };
     });
     lastState = state;
+    highestLevel = Math.max(highestLevel, state.level);
     if (Date.now() >= nextSample) {
       const sample = {
         second: Math.round((Date.now() - started) / 1_000),
+        level: state.level,
+        phase: state.phase,
         fps: state.fps,
+        ammo: state.ammo[state.weapon],
+        reloadRemaining: state.reloadRemaining,
+        errors: errors.length,
         live: state.zombies.filter((zombie) => zombie.hp > 0).length,
         corpses: state.zombies.filter((zombie) => zombie.hp <= 0).length,
         effects: state.render.effects,
@@ -63,10 +76,29 @@ try {
         triangles: state.render.triangles,
       };
       samples.push(sample);
-      assert(sample.live <= 30, `Live zombie limit exceeded: ${sample.live}`);
-      assert(sample.corpses <= 4, `Corpses are not being recycled: ${sample.corpses}`);
+      assert(
+        sample.live <= definitions.rules.maxZombies,
+        `Live zombie limit exceeded: ${sample.live}`,
+      );
+      // A shotgun can clear all 30 live targets twice within the 1.5 second corpse lifetime.
+      assert(
+        sample.corpses <= definitions.rules.maxZombies * 2,
+        `Corpses are not being recycled: ${sample.corpses}`,
+      );
       assert(sample.effects <= 61, `Effect pool capacity exceeded: ${sample.effects}`);
-      assert(state.hp >= 0 && state.hp <= 100, `Invalid health: ${state.hp}`);
+      assert(state.hp >= 0 && state.hp <= definitions.rules.maxHp, `Invalid health: ${state.hp}`);
+      assert(state.spawned <= definitions.totals[state.level - 1], 'Level spawn quota exceeded');
+      assert(
+        state.reloadRemaining >= 0 &&
+          state.reloadRemaining <= definitions.weapons[state.weapon].reloadTime,
+        'Invalid reload progress',
+      );
+      for (const [weapon, ammo] of Object.entries(state.ammo)) {
+        assert(
+          Number.isInteger(ammo) && ammo >= 0 && ammo <= definitions.weapons[weapon].magazine,
+          `Invalid ${weapon} magazine: ${ammo}`,
+        );
+      }
       assert(
         state.zombies.every((zombie) => Number.isFinite(zombie.x) && Number.isFinite(zombie.z)),
         'Zombie position is not finite',
@@ -75,14 +107,29 @@ try {
       nextSample += 1_000;
     }
 
-    if (state.phase === 'over') {
+    if (state.phase === 'over' || state.phase === 'cleared' || state.phase === 'victory') {
       await page.mouse.up();
       holding = false;
       finishedShots += state.shots;
       finishedKills += state.kills;
       finishedElapsed += state.elapsed;
-      restarts++;
-      await page.getByRole('button', { name: '再次出击' }).click();
+      if (state.phase === 'over') {
+        retries++;
+        await page.getByRole('button', { name: '重试本关', exact: true }).click();
+      } else {
+        assert.equal(
+          state.kills,
+          definitions.totals[state.level - 1],
+          'A level cleared before every enemy was killed',
+        );
+        clearedLevels++;
+        if (state.phase === 'victory') {
+          victories++;
+          await page.getByRole('button', { name: '重新出击', exact: true }).click();
+        } else {
+          await page.getByRole('button', { name: '下一关', exact: true }).click();
+        }
+      }
     } else if (state.phase === 'paused') {
       throw new Error('The soak session unexpectedly paused');
     } else if (target) {
@@ -91,9 +138,14 @@ try {
         await page.mouse.down();
         holding = true;
       }
-    } else if (holding) {
-      await page.mouse.up();
-      holding = false;
+    } else {
+      if (holding) {
+        await page.mouse.up();
+        holding = false;
+      }
+      if (state.reloadRemaining === 0 && state.ammo.rifle < definitions.weapons.rifle.magazine) {
+        await page.keyboard.press('r');
+      }
     }
     await page.waitForTimeout(100);
   }
@@ -121,7 +173,10 @@ try {
       drawCalls: peak('drawCalls'),
       triangles: peak('triangles'),
     },
-    restarts,
+    retries,
+    clearedLevels,
+    victories,
+    highestLevel,
     shots: finishedShots + lastState.shots,
     kills: finishedKills + lastState.kills,
     errors,

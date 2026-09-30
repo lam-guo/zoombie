@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import type { GameEvent, GameState, Point, Zombie } from './types';
+import { LEVELS, WEAPONS, WEAPON_IDS, ZOMBIES } from './types';
+import type { GameEvent, GameState, Point, WeaponId, Zombie } from './types';
 
 type Actor = {
   root: THREE.Group;
@@ -10,6 +11,9 @@ type Actor = {
   skin: THREE.MeshStandardMaterial;
   cloth: THREE.MeshStandardMaterial;
   shadow: THREE.Mesh;
+  armor: THREE.Group;
+  health: THREE.Group;
+  healthFill: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
 };
 
 type Effect = {
@@ -46,15 +50,24 @@ export class World {
   private readonly spareActors: Actor[] = [];
   private readonly tracers: Effect[] = [];
   private readonly sparks: Effect[] = [];
+  private readonly aimOccluders: THREE.Object3D[] = [];
   private readonly player: Actor;
+  private readonly weapons = new Map<WeaponId, THREE.Group>();
+  private readonly gun = new THREE.Group();
   private readonly muzzle = new THREE.Group();
   private readonly reticle = new THREE.Group();
+  private readonly spreadGuide = new THREE.Group();
   private readonly aimLine: THREE.Line;
   private readonly cube = this.geometry(new THREE.BoxGeometry(1, 1, 1));
   private readonly cylinder = this.geometry(new THREE.CylinderGeometry(1, 1, 1, 8));
   private readonly sphere = this.geometry(new THREE.IcosahedronGeometry(1, 0));
   private readonly plane = this.geometry(new THREE.PlaneGeometry(1, 1));
   private readonly shadowMaterial: THREE.MeshBasicMaterial;
+  private readonly sky: THREE.HemisphereLight;
+  private readonly sun: THREE.DirectionalLight;
+  private zoneMaterial!: THREE.MeshStandardMaterial;
+  private lampMaterial!: THREE.MeshBasicMaterial;
+  private readonly levelLabels: THREE.CanvasTexture[] = [];
   private readonly cameraPosition = new THREE.Vector3(7.5, 25, 27);
   private readonly cameraTarget = new THREE.Vector3(0, 0, -4.5);
   private time = 0;
@@ -63,6 +76,8 @@ export class World {
   private trauma = 0;
   private width = 1;
   private height = 1;
+  private currentLevel = 0;
+  private currentWeapon: WeaponId = 'rifle';
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
@@ -77,9 +92,9 @@ export class World {
     this.camera.position.copy(this.cameraPosition);
     this.camera.lookAt(this.cameraTarget);
 
-    const sky = new THREE.HemisphereLight('#d4e3d0', '#29362e', 2.4);
+    const sky = (this.sky = new THREE.HemisphereLight('#d4e3d0', '#29362e', 2.4));
     this.scene.add(sky);
-    const sun = new THREE.DirectionalLight('#f5dfb5', 3.1);
+    const sun = (this.sun = new THREE.DirectionalLight('#f5dfb5', 3.1));
     sun.position.set(-9, 23, 8);
     sun.castShadow = true;
     sun.shadow.mapSize.set(1024, 1024);
@@ -117,7 +132,7 @@ export class World {
     this.player = this.createActor(true, 0);
     this.player.root.position.set(0, 0, 7);
     this.scene.add(this.player.root);
-    this.buildRifle();
+    this.buildWeapons();
     this.buildReticle();
 
     const aimGeometry = this.geometry(new THREE.BufferGeometry());
@@ -253,7 +268,9 @@ export class World {
     const white = this.surface('#a0aca0');
     const black = this.surface('#28332d');
     const rust = this.surface('#7f5940');
-    const warmGlow = this.material(new THREE.MeshBasicMaterial({ color: '#ffda85' }));
+    const warmGlow = (this.lampMaterial = this.material(
+      new THREE.MeshBasicMaterial({ color: '#ffda85' }),
+    ));
     const surface = new THREE.Mesh(this.geometry(new THREE.PlaneGeometry(100, 110)), asphalt);
     surface.rotation.x = -Math.PI / 2;
     surface.position.z = -15;
@@ -299,15 +316,18 @@ export class World {
     }
     this.groundMark(this.scene, white, 0, 5, 6.8, 0.12);
     this.groundMark(this.scene, white, 0, -15, 6.8, 0.12);
-    const zoneLabel = this.material(
+    LEVELS.forEach((_, index) =>
+      this.levelLabels.push(this.textTexture(`STAGE 0${index + 1}`, '#a9b4a0')),
+    );
+    const zoneLabel = (this.zoneMaterial = this.material(
       new THREE.MeshStandardMaterial({
-        map: this.textTexture('SECTOR 07', '#a9b4a0'),
+        map: this.levelLabels[0],
         transparent: true,
         roughness: 1,
         depthWrite: false,
         opacity: 0.36,
       }),
-    );
+    ));
     this.groundMark(this.scene, zoneLabel, 0, -10, 6.2, 1.55);
 
     const containerColors = ['#416358', '#637264', '#465953', '#746544'];
@@ -396,6 +416,27 @@ export class World {
     this.scene.add(sign);
     for (const x of [-9, 9]) this.box(this.scene, warmGlow, x, 4.5, -31.7, 0.18, 0.24, 0.18, false);
     this.batchScenery();
+    this.scene.traverse((object) => {
+      if (
+        object instanceof THREE.Mesh &&
+        !Array.isArray(object.material) &&
+        !object.material.transparent
+      ) {
+        this.aimOccluders.push(object);
+      }
+    });
+  }
+
+  private setLevel(level: number): void {
+    const index = Math.max(0, Math.min(LEVELS.length - 1, level - 1));
+    const accent = new THREE.Color(LEVELS[index].color);
+    const background = (this.scene.background as THREE.Color).set('#263733').lerp(accent, 0.08);
+    (this.scene.fog as THREE.FogExp2).color.copy(background);
+    this.sky.color.set('#d4e3d0').lerp(accent, 0.24);
+    this.sun.color.set('#f5dfb5').lerp(accent, 0.3);
+    this.lampMaterial.color.set('#ffda85').lerp(accent, 0.55);
+    this.zoneMaterial.map = this.levelLabels[index];
+    this.currentLevel = level;
   }
 
   private batchScenery(): void {
@@ -461,6 +502,14 @@ export class World {
       this.box(body, dark, 0.14, 1.49, -0.2, 0.21, 0.04, 0.025);
       this.box(head, dark, 0.02, 0.2, 0.07, 0.36, 0.1, 0.3);
     }
+    const armor = new THREE.Group();
+    armor.visible = false;
+    if (!soldier) {
+      this.box(armor, dark, -0.39, 1.55, 0, 0.31, 0.25, 0.47);
+      this.box(armor, dark, 0.39, 1.55, 0, 0.31, 0.25, 0.47);
+      this.box(armor, dark, 0, 1.27, -0.23, 0.56, 0.52, 0.12);
+    }
+    body.add(armor);
     const arms: [THREE.Group, THREE.Group] = [new THREE.Group(), new THREE.Group()];
     const legs: [THREE.Group, THREE.Group] = [new THREE.Group(), new THREE.Group()];
     for (const [i, side] of [-1, 1].entries()) {
@@ -482,6 +531,34 @@ export class World {
     shadow.position.y = 0.035;
     shadow.scale.set(1.55, 1.25, 1);
     root.add(shadow);
+    const health = new THREE.Group();
+    const healthBacking = new THREE.Mesh(
+      this.plane,
+      this.material(
+        new THREE.MeshBasicMaterial({
+          color: '#17251f',
+          transparent: true,
+          opacity: 0.9,
+          depthWrite: false,
+        }),
+      ),
+    );
+    healthBacking.scale.set(0.96, 0.1, 1);
+    const healthFill = new THREE.Mesh(
+      this.plane,
+      this.material(
+        new THREE.MeshBasicMaterial({
+          color: '#bed496',
+          depthWrite: false,
+        }),
+      ),
+    );
+    healthFill.scale.set(0.9, 0.055, 1);
+    healthFill.position.z = 0.01;
+    health.add(healthBacking, healthFill);
+    health.position.y = 2.2;
+    health.visible = false;
+    root.add(health);
     if (soldier) {
       arms[0].rotation.set(1.05, 0, 0.75);
       arms[1].rotation.set(1.35, 0, 0.1);
@@ -493,19 +570,70 @@ export class World {
     root.traverse((object) => {
       if (object instanceof THREE.Mesh) object.castShadow = false;
     });
-    return { root, body, head, arms, legs, skin, cloth, shadow };
+    return { root, body, head, arms, legs, skin, cloth, shadow, armor, health, healthFill };
   }
 
-  private buildRifle(): void {
+  private buildWeapons(): void {
     const gun = this.surface('#243833', 0.5, 0.7);
     const metal = this.surface('#85938a', 0.4, 0.8);
-    const body = this.player.body;
-    this.box(body, gun, 0.33, 1.28, -0.37, 0.15, 0.2, 0.54, false);
-    this.box(body, metal, 0.33, 1.34, -0.67, 0.07, 0.07, 0.14, false);
-    this.box(body, gun, 0.33, 1.16, -0.34, 0.11, 0.22, 0.2, false);
-    this.box(body, gun, 0.33, 1.41, -0.4, 0.06, 0.065, 0.2, false);
-    this.box(body, metal, 0.33, 1.29, -0.75, 0.1, 0.11, 0.08, false);
-    this.muzzle.position.set(0.33, 1.3, -0.81);
+    const stock = this.surface('#986c47');
+    this.gun.position.set(0.33, 1.3, 0);
+    this.player.body.add(this.gun);
+    for (const id of WEAPON_IDS) {
+      const model = new THREE.Group();
+      const sniper = id === 'sniper';
+      const shotgun = id === 'shotgun';
+      this.box(
+        model,
+        shotgun ? stock : gun,
+        0,
+        -0.02,
+        -0.37,
+        shotgun ? 0.21 : 0.15,
+        0.2,
+        0.54,
+        false,
+      );
+      this.box(
+        model,
+        metal,
+        0,
+        0.04,
+        sniper ? -0.77 : -0.67,
+        shotgun ? 0.105 : 0.07,
+        0.07,
+        sniper ? 0.34 : 0.14,
+        false,
+      );
+      this.box(model, gun, 0, -0.14, -0.34, 0.11, shotgun ? 0.12 : 0.22, 0.2, false);
+      this.box(
+        model,
+        gun,
+        0,
+        sniper ? 0.16 : 0.11,
+        -0.4,
+        sniper ? 0.12 : 0.06,
+        sniper ? 0.12 : 0.065,
+        sniper ? 0.32 : 0.2,
+        false,
+      );
+      this.box(
+        model,
+        metal,
+        0,
+        -0.01,
+        sniper ? -0.95 : -0.75,
+        shotgun ? 0.14 : 0.1,
+        0.11,
+        0.08,
+        false,
+      );
+      if (shotgun) this.box(model, stock, 0, -0.025, -0.6, 0.19, 0.15, 0.22, false);
+      model.visible = id === 'rifle';
+      this.weapons.set(id, model);
+      this.gun.add(model);
+    }
+    this.muzzle.position.set(0, 0, -0.81);
     const flashMaterial = this.material(new THREE.MeshBasicMaterial({ color: '#ffe9a2' }));
     const flash = new THREE.Mesh(this.sphere, flashMaterial);
     flash.scale.set(0.16, 0.16, 0.36);
@@ -523,7 +651,13 @@ export class World {
     outerFlash.scale.set(0.28, 0.12, 0.45);
     this.muzzle.add(outerFlash);
     this.muzzle.visible = false;
-    body.add(this.muzzle);
+    this.gun.add(this.muzzle);
+  }
+
+  private setWeapon(weapon: WeaponId): void {
+    for (const [id, model] of this.weapons) model.visible = id === weapon;
+    this.muzzle.position.z = weapon === 'sniper' ? -1.01 : -0.81;
+    this.currentWeapon = weapon;
   }
 
   private buildReticle(): void {
@@ -548,6 +682,39 @@ export class World {
     }
     this.reticle.position.y = 0.065;
     this.scene.add(this.reticle);
+    const { range, halfAngle, color } = WEAPONS.shotgun;
+    const sector = new THREE.Mesh(
+      this.geometry(new THREE.CircleGeometry(range, 24, Math.PI / 2 - halfAngle, halfAngle * 2)),
+      this.material(
+        new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.045,
+          depthWrite: false,
+        }),
+      ),
+    );
+    sector.rotation.x = -Math.PI / 2;
+    const edgePoints = [new THREE.Vector3()];
+    for (let i = 0; i <= 24; i++) {
+      const angle = -halfAngle + (i / 24) * halfAngle * 2;
+      edgePoints.push(new THREE.Vector3(Math.sin(angle) * range, 0, -Math.cos(angle) * range));
+    }
+    edgePoints.push(new THREE.Vector3());
+    const edge = new THREE.Line(
+      this.geometry(new THREE.BufferGeometry().setFromPoints(edgePoints)),
+      this.material(
+        new THREE.LineBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.25,
+          depthWrite: false,
+        }),
+      ),
+    );
+    this.spreadGuide.add(sector, edge);
+    this.spreadGuide.visible = false;
+    this.scene.add(this.spreadGuide);
   }
 
   private buildEffects(): void {
@@ -587,9 +754,12 @@ export class World {
   handleEvents(events: GameEvent[]): void {
     for (const event of events) {
       if (event.type === 'shot') {
-        this.flashTime = 0.06;
-        this.recoil = 1;
-        this.trauma = Math.max(this.trauma, 0.12);
+        if (this.currentWeapon !== event.weapon) this.setWeapon(event.weapon);
+        this.flashTime = event.weapon === 'rifle' ? 0.06 : 0.09;
+        this.recoil = event.weapon === 'rifle' ? 1 : 1.4;
+        this.trauma = Math.max(this.trauma, event.weapon === 'rifle' ? 0.12 : 0.2);
+        this.muzzle.scale.setScalar(event.weapon === 'shotgun' ? 1.45 : 1);
+        this.gun.rotation.set(0, 0, 0);
         this.player.root.position.set(event.from.x, 0, event.from.z);
         this.player.root.rotation.y = Math.atan2(
           event.from.x - event.to.x,
@@ -597,19 +767,20 @@ export class World {
         );
         this.player.root.updateMatrixWorld(true);
         const origin = this.muzzle.getWorldPosition(this.vector);
-        this.direction.set(event.to.x, event.hit ? 1.05 : 1.2, event.to.z).sub(origin);
-        const forwardDistance =
-          this.direction.x * (event.to.x - event.from.x) +
-          this.direction.z * (event.to.z - event.from.z);
-        // A point-blank hit can fall inside the barrel. Keep its hit feedback without a backwards tracer.
-        if (forwardDistance <= 0) continue;
-        const tracer = this.tracers.find((effect) => effect.life <= 0) ?? this.tracers[0];
-        const length = this.direction.length();
-        tracer.mesh.position.copy(origin).addScaledVector(this.direction, 0.5);
-        tracer.mesh.quaternion.setFromUnitVectors(UP, this.direction.normalize());
-        tracer.mesh.scale.set(0.015, length, 0.015);
-        tracer.life = tracer.duration;
-        tracer.mesh.visible = true;
+        if (event.weapon === 'shotgun') {
+          const facing = Math.atan2(event.to.x - event.from.x, event.to.z - event.from.z);
+          for (let i = 0; i < 5; i++) {
+            const angle =
+              facing - WEAPONS.shotgun.halfAngle + (i / 4) * WEAPONS.shotgun.halfAngle * 2;
+            const to = {
+              x: event.from.x + Math.sin(angle) * WEAPONS.shotgun.range,
+              z: event.from.z + Math.cos(angle) * WEAPONS.shotgun.range,
+            };
+            this.addTracer(origin, event.from, to, event.weapon, false);
+          }
+        } else {
+          this.addTracer(origin, event.from, event.to, event.weapon, event.hit);
+        }
       } else if (event.type === 'hit') {
         for (let i = 0; i < (event.killed ? 8 : 4); i++) {
           const spark = this.sparks.find((effect) => effect.life <= 0);
@@ -631,14 +802,52 @@ export class World {
     }
   }
 
+  private addTracer(
+    origin: THREE.Vector3,
+    from: Point,
+    to: Point,
+    weapon: WeaponId,
+    hit: boolean,
+  ): void {
+    this.direction.set(to.x, hit ? 1.05 : 1.2, to.z).sub(origin);
+    const forwardDistance = this.direction.x * (to.x - from.x) + this.direction.z * (to.z - from.z);
+    // A point-blank hit can fall inside the barrel. Keep its hit feedback without a backwards tracer.
+    if (forwardDistance <= 0) return;
+    const tracer = this.tracers.find((effect) => effect.life <= 0) ?? this.tracers[0];
+    const length = this.direction.length();
+    tracer.mesh.position.copy(origin).addScaledVector(this.direction, 0.5);
+    tracer.mesh.quaternion.setFromUnitVectors(UP, this.direction.normalize());
+    const thickness = weapon === 'sniper' ? 0.026 : 0.015;
+    tracer.mesh.scale.set(thickness, length, thickness);
+    (tracer.mesh.material as THREE.MeshBasicMaterial).color.set(WEAPONS[weapon].color);
+    tracer.duration = weapon === 'sniper' ? 0.13 : 0.07;
+    tracer.life = tracer.duration;
+    tracer.mesh.visible = true;
+  }
+
   private animateZombie(actor: Actor, zombie: Zombie, state: GameState): void {
     const dx = state.player.x - zombie.x;
     const dz = state.player.z - zombie.z;
     actor.root.position.set(zombie.x, 0, zombie.z);
     actor.root.rotation.y = Math.atan2(-dx, -dz);
     const dead = zombie.deadTime >= 0;
-    const stride = this.time * 5.2 + zombie.id * 1.7;
+    actor.root.userData.alive = !dead;
+    const stride =
+      this.time *
+        (zombie.kind === 'tank'
+          ? 3
+          : zombie.kind === 'runner'
+            ? 8.2
+            : zombie.kind === 'small'
+              ? 7
+              : 5.2) +
+      zombie.id * 1.7;
     const attacking = dx * dx + dz * dz < 2.8;
+    actor.health.visible = !dead && (zombie.hp < zombie.maxHp || zombie.kind === 'tank');
+    actor.health.quaternion.copy(actor.root.quaternion).invert().multiply(this.camera.quaternion);
+    const healthRatio = Math.max(0, Math.min(1, zombie.hp / zombie.maxHp));
+    actor.healthFill.scale.x = 0.9 * healthRatio;
+    actor.healthFill.position.x = -0.45 * (1 - healthRatio);
     actor.skin.emissive.set(zombie.hitTime > 0 ? '#ccb97e' : '#000000');
     actor.cloth.emissive.set(zombie.hitTime > 0 ? '#8d7956' : '#000000');
     actor.skin.emissiveIntensity = actor.cloth.emissiveIntensity = Math.min(1, zombie.hitTime * 7);
@@ -654,7 +863,7 @@ export class World {
     } else {
       actor.body.position.y = Math.abs(Math.sin(stride)) * 0.045;
       actor.body.rotation.set(
-        zombie.hitTime > 0 ? -zombie.hitTime * 0.7 : 0.055,
+        zombie.hitTime > 0 ? -zombie.hitTime * 0.7 : zombie.kind === 'runner' ? 0.22 : 0.055,
         0,
         Math.sin(stride * 0.5) * 0.04,
       );
@@ -673,6 +882,8 @@ export class World {
 
   render(state: GameState, aim: Point, dt: number): void {
     this.time += dt;
+    if (this.currentLevel !== state.level) this.setLevel(state.level);
+    if (this.currentWeapon !== state.weapon) this.setWeapon(state.weapon);
     const present = new Set(state.zombies.map((zombie) => zombie.id));
     for (const [id, actor] of this.actors) {
       if (!present.has(id)) {
@@ -685,10 +896,21 @@ export class World {
       let actor = this.actors.get(zombie.id);
       if (!actor) {
         actor = this.spareActors.pop() ?? this.createActor(false, zombie.variant);
-        actor.skin.color.set(['#91a37b', '#839b85', '#a1a084'][zombie.variant % 3]);
-        actor.cloth.color.set(['#586e5e', '#78715b', '#566d70'][zombie.variant % 3]);
+        actor.skin.color.set(ZOMBIES[zombie.kind].color);
+        actor.cloth.color.set(
+          { normal: '#586e5e', tank: '#86594e', runner: '#a08750', small: '#487a72' }[zombie.kind],
+        );
+        actor.healthFill.material.color.set(ZOMBIES[zombie.kind].color);
+        actor.armor.visible = zombie.kind === 'tank';
+        actor.body.scale.set(
+          zombie.kind === 'tank' ? 1.22 : zombie.kind === 'runner' ? 0.82 : 1,
+          1,
+          zombie.kind === 'tank' ? 1.12 : 1,
+        );
+        actor.head.scale.setScalar(zombie.kind === 'small' ? 1.18 : 1);
         actor.root.visible = true;
-        actor.root.scale.setScalar(1 + (zombie.variant % 3) * 0.065);
+        actor.root.scale.setScalar(ZOMBIES[zombie.kind].scale * (1 + (zombie.variant % 3) * 0.025));
+        actor.root.userData.zombieId = zombie.id;
         this.scene.add(actor.root);
         this.actors.set(zombie.id, actor);
       }
@@ -704,17 +926,34 @@ export class World {
     this.player.body.rotation.x = -this.recoil * 0.035;
     if (state.phase === 'over')
       this.player.body.rotation.x = Math.min(0.9, this.player.body.rotation.x + 0.6);
+    const reloadProgress =
+      state.reloadRemaining > 0 ? 1 - state.reloadRemaining / WEAPONS[state.weapon].reloadTime : 0;
+    const reloadPose =
+      state.reloadRemaining > 0 ? Math.sin(Math.PI * Math.max(0, Math.min(1, reloadProgress))) : 0;
+    this.gun.rotation.set(-reloadPose * 0.22, 0, reloadPose * 0.42);
+    this.player.arms[0].rotation.set(1.05 - reloadPose * 0.8, 0, 0.75 + reloadPose * 0.2);
+    this.player.arms[1].rotation.set(1.35 - reloadPose * 0.16, 0, 0.1);
     this.muzzle.visible = this.flashTime > 0;
     this.muzzle.rotation.z = this.time * 53;
     this.reticle.position.set(aim.x, 0.065, aim.z);
     this.reticle.visible = state.phase === 'playing' || state.phase === 'ready';
     this.aimLine.visible = this.reticle.visible;
+    this.spreadGuide.visible = this.reticle.visible && state.weapon === 'shotgun';
+    this.spreadGuide.position.set(state.player.x, 0.055, state.player.z);
+    this.spreadGuide.rotation.y = this.player.root.rotation.y;
+    const aimDistance = Math.hypot(aim.x - state.player.x, aim.z - state.player.z);
+    const aimScale =
+      state.weapon === 'shotgun' && aimDistance > WEAPONS.shotgun.range
+        ? WEAPONS.shotgun.range / aimDistance
+        : 1;
+    const lineX = state.player.x + (aim.x - state.player.x) * aimScale;
+    const lineZ = state.player.z + (aim.z - state.player.z) * aimScale;
     const positions = this.aimLine.geometry.getAttribute('position') as THREE.BufferAttribute;
     positions.setXYZ(0, state.player.x, 0.06, state.player.z - 0.55);
-    positions.setXYZ(1, aim.x, 0.06, aim.z);
+    positions.setXYZ(1, lineX, 0.06, lineZ);
     positions.needsUpdate = true;
     const distances = this.aimLine.geometry.getAttribute('lineDistance') as THREE.BufferAttribute;
-    distances.setX(1, Math.hypot(aim.x - state.player.x, aim.z - state.player.z + 0.55));
+    distances.setX(1, Math.hypot(lineX - state.player.x, lineZ - state.player.z + 0.55));
     distances.needsUpdate = true;
 
     for (const effect of this.tracers) {
@@ -744,6 +983,22 @@ export class World {
       -((clientY - rect.top) / rect.height) * 2 + 1,
     );
     this.raycaster.setFromCamera(this.pointer, this.camera);
+    // Prefer a visible living body over the ground behind it. The nearest opaque scenery
+    // remains an occluder, so this does not select enemies through containers or walls.
+    const targets = [...this.aimOccluders];
+    for (const actor of this.actors.values()) {
+      if (!actor.root.visible || !actor.root.userData.alive) continue;
+      actor.body.traverseVisible((object) => {
+        if (object instanceof THREE.Mesh) targets.push(object);
+      });
+    }
+    const nearest = this.raycaster.intersectObjects(targets, false)[0];
+    if (nearest) {
+      let object = nearest.object;
+      while (object.parent && object.parent !== this.scene) object = object.parent;
+      const actor = this.actors.get(object.userData.zombieId as number);
+      if (actor) return { x: actor.root.position.x, z: actor.root.position.z };
+    }
     if (!this.raycaster.ray.intersectPlane(this.ground, this.intersection)) return null;
     return { x: this.intersection.x, z: this.intersection.z };
   }

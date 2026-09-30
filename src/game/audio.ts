@@ -1,4 +1,4 @@
-import type { GameEvent } from './types';
+import type { GameEvent, WeaponId } from './types';
 
 // Short synthesized sounds keep the game self-contained and avoid asset downloads.
 export class GameAudio {
@@ -11,7 +11,7 @@ export class GameAudio {
       this.context = new AudioContext();
       this.noise = this.context.createBuffer(
         1,
-        this.context.sampleRate * 0.15,
+        this.context.sampleRate * 0.3,
         this.context.sampleRate,
       );
       const channel = this.noise.getChannelData(0);
@@ -24,10 +24,23 @@ export class GameAudio {
     const context = this.context;
     if (!context || this.muted || context.state !== 'running') return;
     for (const event of events) {
-      if (event.type === 'shot') this.shot(context);
+      if (event.type === 'shot') this.shot(context, event.weapon);
       if (event.type === 'hit' && event.killed) this.tone(context, 190, 75, 0.09, 0.055);
+      if (event.type === 'reload') {
+        this.noiseBurst(context, 0.045, 2200, 0.035);
+        this.tone(context, 410, 140, 0.055, 0.025);
+      }
+      if (event.type === 'loaded') {
+        this.noiseBurst(context, 0.035, 3200, 0.055);
+        this.tone(context, 620, 260, 0.045, 0.045);
+      }
       if (event.type === 'hurt') this.tone(context, 105, 48, 0.2, 0.12);
       if (event.type === 'over') this.tone(context, 160, 28, 0.7, 0.13);
+      if (event.type === 'clear') {
+        this.tone(context, 392, 392, 0.18, 0.065);
+        this.tone(context, 494, 494, 0.18, 0.065, 0.13);
+        this.tone(context, event.final ? 784 : 587, event.final ? 784 : 587, 0.3, 0.065, 0.26);
+      }
     }
   }
 
@@ -37,10 +50,11 @@ export class GameAudio {
     end: number,
     length: number,
     volume: number,
+    delay = 0,
   ): void {
     const oscillator = context.createOscillator();
     const gain = context.createGain();
-    const now = context.currentTime;
+    const now = context.currentTime + delay;
     oscillator.type = 'triangle';
     oscillator.frequency.setValueAtTime(start, now);
     oscillator.frequency.exponentialRampToValueAtTime(end, now + length);
@@ -55,25 +69,42 @@ export class GameAudio {
     };
   }
 
-  private shot(context: AudioContext): void {
+  private shot(context: AudioContext, weapon: WeaponId): void {
+    if (weapon === 'sniper') {
+      this.noiseBurst(context, 0.22, 1900, 0.2);
+      this.tone(context, 110, 30, 0.23, 0.18);
+    } else if (weapon === 'shotgun') {
+      this.noiseBurst(context, 0.17, 1600, 0.22);
+      this.tone(context, 90, 30, 0.16, 0.18);
+    } else {
+      this.noiseBurst(context, 0.12, 2600, 0.16);
+      this.tone(context, 150, 45, 0.11, 0.14);
+    }
+  }
+
+  private noiseBurst(
+    context: AudioContext,
+    length: number,
+    frequency: number,
+    volume: number,
+  ): void {
     const source = context.createBufferSource();
     const filter = context.createBiquadFilter();
     const gain = context.createGain();
     const now = context.currentTime;
     source.buffer = this.noise!;
     filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(2600, now);
-    filter.frequency.exponentialRampToValueAtTime(300, now + 0.1);
-    gain.gain.setValueAtTime(0.16, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+    filter.frequency.setValueAtTime(frequency, now);
+    filter.frequency.exponentialRampToValueAtTime(300, now + length);
+    gain.gain.setValueAtTime(volume, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + length);
     source.connect(filter).connect(gain).connect(context.destination);
     source.start(now);
-    source.stop(now + 0.13);
+    source.stop(now + length + 0.01);
     source.onended = () => {
       source.disconnect();
       filter.disconnect();
       gain.disconnect();
     };
-    this.tone(context, 150, 45, 0.11, 0.14);
   }
 }

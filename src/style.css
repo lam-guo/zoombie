@@ -633,35 +633,7 @@ kbd {
   flex-shrink: 0;
   gap: 20px;
 }
-.weapon-icon {
-  width: 75px;
-  color: #a4b3a4;
-}
-.weapon-icon svg {
-  width: 75px;
-  height: 32px;
-}
-.weapon-name {
-  font-family: monospace;
-  font-size: 13px;
-  color: #e1e7d8;
-  letter-spacing: 1px;
-}
-.weapon-name > span {
-  font:
-    10px 'PingFang SC',
-    sans-serif;
-  color: #a2b399;
-  letter-spacing: 1px;
-  margin-left: 9px;
-}
-.weapon-name small {
-  display: block;
-  font-size: 9px;
-  letter-spacing: 1px;
-  color: #708778;
-  margin-top: 7px;
-}
+
 .ammo {
   margin-left: 20px;
   display: flex;
@@ -679,48 +651,7 @@ kbd {
   color: #8eaa85;
   letter-spacing: 1px;
 }
-.footer-divider {
-  height: 26px;
-  width: 1px;
-  background: var(--line);
-  margin: 0 8px;
-}
-.footer-controls {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  font-size: 10px;
-  color: #809a88;
-}
-.footer-controls > span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.footer-controls svg {
-  width: 14px;
-  height: 14px;
-}
-.tiny-dot {
-  width: 5px;
-  height: 5px;
-  border: 1px solid #829980;
-  border-radius: 50%;
-}
-.footer-note {
-  margin-left: auto;
-  font-size: 9px;
-  letter-spacing: 1px;
-  color: #81937b;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.footer-note .live-dot {
-  width: 4px;
-  height: 4px;
-  background: #78936e;
-}
+
 @media (min-width: 1600px) {
   #app {
     padding: 0 45px;
@@ -777,16 +708,11 @@ kbd {
     font-size: 9px;
     letter-spacing: 1px;
   }
-  .footer-note {
-    display: none;
-  }
+
   .bottom-bar {
     gap: 12px;
   }
-  .footer-controls {
-    gap: 13px;
-    font-size: 9px;
-  }
+
   .ammo {
     margin-left: 8px;
   }
@@ -796,12 +722,6 @@ kbd {
   }
   h1 {
     font-size: 57px;
-  }
-  .weapon-icon {
-    width: 60px;
-  }
-  .weapon-icon svg {
-    width: 60px;
   }
 }
 @media (max-width: 700px) {
@@ -895,17 +815,7 @@ kbd {
     height: 78px;
     gap: 12px;
   }
-  .weapon-icon,
-  .footer-controls,
-  .footer-divider {
-    display: none;
-  }
-  .weapon-name {
-    font-size: 12px;
-  }
-  .weapon-name small {
-    font-size: 8px;
-  }
+
   .ammo {
     margin-left: auto;
   }
@@ -934,5 +844,265 @@ kbd {
   button,
   .health-track i {
     transition: none;
+  }
+}
+
+/* Campaign status and the three persistent magazines. */
+.keyboard-row {
+  gap: 20px;
+  margin-top: 13px;
+  color: #a4b49d;
+}
+.keyboard-row kbd {
+  margin-left: 0;
+}
+.level-progress {
+  position: absolute;
+  left: 28px;
+  right: 28px;
+  bottom: 53px;
+  max-width: 470px;
+  pointer-events: none;
+}
+.level-progress > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  font-size: 10px;
+  color: #d6e3cf;
+}
+.level-progress strong {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--accent);
+}
+.level-track {
+  height: 3px;
+  background: #adc99522;
+  margin: 10px 0 7px;
+}
+.level-track i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+.level-progress small {
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: #9eb5a3;
+}
+.bottom-bar {
+  height: 110px;
+  gap: 24px;
+}
+.weapon-picker {
+  display: flex;
+  gap: 9px;
+  flex: 1;
+  max-width: 790px;
+}
+.weapon-card {
+  position: relative;
+  text-align: left;
+  flex: 1;
+  min-width: 0;
+  height: 76px;
+  padding: 11px 14px;
+  border: 1px solid #79938130;
+  background: #142320;
+  color: #a5b3a5;
+  border-radius: 4px;
+}
+.weapon-card:disabled {
+  opacity: 0.65;
+}
+.weapon-card[aria-pressed='true'] {
+  color: var(--weapon-color);
+  border-color: var(--weapon-color);
+  background: #23352e;
+}
+.weapon-card > span {
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.weapon-card kbd {
+  color: inherit;
+  margin-left: 0;
+}
+.weapon-card small {
+  display: block;
+  font-size: 9px;
+  color: #8ba08d;
+  margin-top: 9px;
+}
+.weapon-card > b {
+  position: absolute;
+  right: 13px;
+  top: 13px;
+  font: 11px monospace;
+  font-weight: 400;
+}
+.ammo-panel {
+  position: relative;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-width: 220px;
+  padding-bottom: 12px;
+}
+.ammo-panel .ammo {
+  margin-left: 0;
+}
+.ammo strong {
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: right;
+}
+.ammo strong.empty {
+  color: #e8977d;
+}
+.ammo span b {
+  font-weight: 500;
+}
+.ammo span small {
+  display: block;
+  font-size: 8px;
+  margin-top: 6px;
+  color: #718b79;
+}
+.reload-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 114px;
+  height: 39px;
+  border: 1px solid #718c664d;
+  border-radius: 3px;
+  background: #26382a;
+  color: #deedb5;
+  font-size: 11px;
+}
+.reload-button:disabled {
+  opacity: 0.55;
+}
+.reload-track {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: #aec89c18;
+}
+.reload-track i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+@media (max-width: 1150px) {
+  .weapon-card {
+    padding: 10px;
+  }
+  .weapon-card > b {
+    position: static;
+    display: block;
+    margin-top: 7px;
+  }
+  .weapon-card small {
+    display: none;
+  }
+  .ammo-panel {
+    min-width: 200px;
+    gap: 12px;
+  }
+}
+@media (max-width: 700px) {
+  #app {
+    min-height: 640px;
+  }
+  .bottom-bar {
+    height: 151px;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 9px;
+    padding: 10px 0;
+  }
+  .weapon-picker {
+    gap: 6px;
+    width: 100%;
+  }
+  .weapon-card {
+    height: 64px;
+    padding: 9px;
+  }
+  .weapon-card > span {
+    font-size: 10px;
+    gap: 3px;
+  }
+  .weapon-card kbd {
+    padding: 2px 4px;
+  }
+  .weapon-card > b {
+    font-size: 10px;
+    margin-top: 6px;
+  }
+  .ammo-panel {
+    width: 100%;
+    margin: 0;
+    justify-content: space-between;
+    min-width: 0;
+    padding: 0 5px 9px;
+  }
+  .ammo-panel .ammo {
+    margin: 0;
+  }
+  .ammo strong {
+    font-size: 26px;
+  }
+  .ammo span small {
+    display: inline;
+    margin-left: 14px;
+  }
+  .reload-button {
+    height: 34px;
+  }
+  .level-progress {
+    left: 17px;
+    right: 17px;
+    bottom: 48px;
+  }
+  .level-progress > div:first-child {
+    font-size: 8px;
+    gap: 8px;
+  }
+  .level-progress strong {
+    font-size: 9px;
+  }
+  .level-progress small {
+    font-size: 8px;
+  }
+  .intro {
+    top: 46%;
+    width: 275px;
+  }
+  h1 {
+    font-size: 46px;
+    margin: 16px 0;
+  }
+  .intro-rule {
+    margin: 13px 0;
+  }
+  .intro .primary-button {
+    margin-top: 18px;
+  }
+  .keyboard-row {
+    margin-top: 8px;
+  }
+  .coordinates {
+    max-width: 75%;
   }
 }

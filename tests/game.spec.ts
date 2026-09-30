@@ -1,5 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
-import { RULES, type GameState, type Point } from '../src/game/types';
+import {
+  LEVELS,
+  RULES,
+  WEAPONS,
+  levelTotal,
+  type GameState,
+  type Point,
+  type WeaponId,
+} from '../src/game/types';
 
 type Snapshot = GameState & {
   fps: number;
@@ -64,6 +72,56 @@ async function fireAtNearest(page: Page) {
   }
 }
 
+async function startControlled(page: Page) {
+  await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') });
+  // Reload so performance.now and the first animation frame share the controlled clock.
+  await page.reload();
+  await start(page);
+  await page.clock.pauseAt(new Date('2026-01-01T00:10:00Z'));
+}
+
+async function advanceUntil(page: Page, condition: (state: Snapshot) => boolean, seconds: number) {
+  for (let frame = 0; frame <= seconds * 4; frame++) {
+    const state = await snapshot(page);
+    if (condition(state)) return state;
+    await page.clock.fastForward(250);
+  }
+  throw new Error(`Expected game state was not reached within ${seconds} simulated seconds`);
+}
+
+async function fireControlled(page: Page) {
+  const before = await snapshot(page);
+  const target = await nearestTarget(page);
+  expect(target).not.toBeNull();
+  await page.mouse.move(target!.x, target!.y);
+  await page.mouse.down();
+  try {
+    await advanceUntil(page, (state) => state.shots > before.shots, 5);
+  } finally {
+    await page.mouse.up();
+  }
+  return snapshot(page);
+}
+
+function expectFreshLevel(state: Snapshot, level: number, weapon: WeaponId) {
+  expect(state.phase).toBe('playing');
+  expect(state.level).toBe(level);
+  expect(state.weapon).toBe(weapon);
+  expect(state.hp).toBe(RULES.maxHp);
+  expect(state.kills).toBe(0);
+  expect(state.shots).toBe(0);
+  expect(state.hits).toBe(0);
+  expect(state.elapsed).toBe(0);
+  expect(state.reloadRemaining).toBe(0);
+  expect(state.firing).toBe(false);
+  expect(state.ammo).toEqual(
+    Object.fromEntries(Object.entries(WEAPONS).map(([id, weapon]) => [id, weapon.magazine])),
+  );
+  expect(state.zombies).toHaveLength(state.spawned);
+  expect(state.zombies.every((zombie) => zombie.hp === zombie.maxHp)).toBe(true);
+  expect(state.render.effects).toBe(0);
+}
+
 test.beforeEach(async ({ page }) => {
   const errors: string[] = [];
   browserErrors.set(page, errors);
@@ -102,11 +160,7 @@ test('start, aim, hold fire, kill, and release', async ({ page }) => {
 });
 
 test('200ms frames preserve elapsed time and fire rate', async ({ page }) => {
-  await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') });
-  // Reload so performance.now and the game's first animation frame share the controlled clock.
-  await page.reload();
-  await start(page);
-  await page.clock.pauseAt(new Date('2026-01-01T00:10:00Z'));
+  await startControlled(page);
   const target = await nearestTarget(page);
   await page.mouse.move(target!.x, target!.y);
   const before = await snapshot(page);
@@ -199,47 +253,176 @@ test.describe('browser focus', () => {
   );
 });
 
-for (const restartMethod of ['keyboard', 'button'] as const) {
-  test(`natural death and ${restartMethod} restart reset the session`, async ({ page }) => {
-    await start(page);
-    await fireAtNearest(page);
-    await expect(page.getByRole('dialog', { name: '防线失守' })).toBeVisible({ timeout: 60_000 });
-    const ended = await snapshot(page);
-    expect(ended.phase).toBe('over');
-    expect(ended.hp).toBe(0);
-    expect(ended.firing).toBe(false);
-    await expect(page.locator('#result-kills')).toHaveText(String(ended.kills));
-    await page.waitForTimeout(400);
-    expect((await snapshot(page)).elapsed).toBe(ended.elapsed);
+test('three weapon magazines persist and switching cancels held fire and reloading', async ({
+  page,
+}) => {
+  await startControlled(page);
+  const rifle = await fireControlled(page);
+  expect(rifle.ammo.rifle).toBeLessThan(WEAPONS.rifle.magazine);
 
-    if (restartMethod === 'keyboard') await page.keyboard.press('r');
-    else await page.getByRole('button', { name: '再次出击' }).click();
-    await page.keyboard.press('Escape');
-    await expect(page.getByRole('dialog', { name: '行动暂停' })).toBeVisible();
-    const restarted = await snapshot(page);
-    expect(restarted.hp).toBe(RULES.maxHp);
-    expect(restarted.kills).toBe(0);
-    expect(restarted.shots).toBe(0);
-    expect(restarted.hits).toBe(0);
-    expect(restarted.firing).toBe(false);
-    expect(restarted.elapsed).toBeLessThan(ended.elapsed);
-    expect(restarted.zombies).toHaveLength(3 + Math.floor(restarted.elapsed / RULES.spawnInterval));
-    expect(restarted.zombies.map((zombie) => zombie.id)).toEqual(
-      restarted.zombies.map((_, index) => index + 1),
+  await page.mouse.down();
+  await page.keyboard.press('2');
+  const switched = await snapshot(page);
+  expect(switched.weapon).toBe('sniper');
+  expect(switched.firing).toBe(false);
+  await expect(page.getByRole('button', { name: '狙击枪', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  await page.clock.fastForward(250);
+  expect((await snapshot(page)).shots).toBe(switched.shots);
+  await page.mouse.up();
+  const sniper = await fireControlled(page);
+  expect(sniper.ammo.sniper).toBeLessThan(WEAPONS.sniper.magazine);
+
+  await page.getByRole('button', { name: '霰弹枪', exact: true }).click();
+  const shotgun = await fireControlled(page);
+  expect(shotgun.ammo.shotgun).toBeLessThan(WEAPONS.shotgun.magazine);
+  await page.keyboard.press('1');
+  expect((await snapshot(page)).ammo.rifle).toBe(rifle.ammo.rifle);
+  await page.keyboard.press('r');
+  expect((await snapshot(page)).reloadRemaining).toBeGreaterThan(0);
+  await page.getByRole('button', { name: '狙击枪', exact: true }).click();
+  const cancelled = await snapshot(page);
+  expect(cancelled.reloadRemaining).toBe(0);
+  expect(cancelled.ammo.rifle).toBe(rifle.ammo.rifle);
+  expect(cancelled.ammo.sniper).toBe(sniper.ammo.sniper);
+  await page.keyboard.press('3');
+  expect((await snapshot(page)).ammo.shotgun).toBe(shotgun.ammo.shotgun);
+  await expect(page.getByRole('button', { name: '霰弹枪', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+});
+
+test('manual reload blocks shots and pauses without losing reload progress', async ({ page }) => {
+  await startControlled(page);
+  const fired = await fireControlled(page);
+  await page.keyboard.press('r');
+  const loading = await snapshot(page);
+  expect(loading.phase).toBe('playing');
+  expect(loading.level).toBe(1);
+  expect(loading.shots).toBe(fired.shots);
+  expect(loading.ammo.rifle).toBe(fired.ammo.rifle);
+  expect(loading.reloadRemaining).toBeCloseTo(WEAPONS.rifle.reloadTime, 5);
+  await page.mouse.down();
+  await page.clock.fastForward(250);
+  expect((await snapshot(page)).shots).toBe(fired.shots);
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  const paused = await snapshot(page);
+  await page.clock.fastForward(5_000);
+  expect((await snapshot(page)).reloadRemaining).toBe(paused.reloadRemaining);
+  await page.keyboard.press('Escape');
+  const loaded = await advanceUntil(
+    page,
+    (state) => state.reloadRemaining === 0,
+    WEAPONS.rifle.reloadTime + 1,
+  );
+  expect(loaded.ammo.rifle).toBe(WEAPONS.rifle.magazine);
+  expect(loaded.shots).toBe(fired.shots);
+  expect(loaded.firing).toBe(false);
+});
+
+test('an empty magazine automatically reloads and held fire resumes', async ({ page }) => {
+  await startControlled(page);
+  const point = await page.evaluate(() => window.__game.project({ x: 0, z: -10 }));
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.down();
+  try {
+    const empty = await advanceUntil(page, (state) => state.reloadRemaining > 0, 10);
+    expect(empty.ammo.rifle).toBe(0);
+    expect(empty.shots).toBe(WEAPONS.rifle.magazine);
+    await page.clock.fastForward(250);
+    expect((await snapshot(page)).shots).toBe(empty.shots);
+    const firingAgain = await advanceUntil(
+      page,
+      (state) => state.shots > empty.shots,
+      WEAPONS.rifle.reloadTime + 1,
     );
-    expect(restarted.render.effects).toBe(0);
+    expect(firingAgain.ammo.rifle).toBeGreaterThan(0);
+    expect(firingAgain.ammo.rifle).toBeLessThan(WEAPONS.rifle.magazine);
+    expect(firingAgain.reloadRemaining).toBe(0);
+  } finally {
+    await page.mouse.up();
+  }
+});
 
-    await page.getByRole('button', { name: '继续战斗' }).click();
-    await expect
-      .poll(async () => (await snapshot(page)).elapsed)
-      .toBeGreaterThan(restarted.elapsed + 2);
-    await page.keyboard.press('Escape');
-    const later = await snapshot(page);
-    expect(later.zombies).toHaveLength(3 + Math.floor(later.elapsed / RULES.spawnInterval));
-    expect(later.shots).toBe(0);
-    expect(later.hp).toBe(RULES.maxHp);
-  });
-}
+test('natural death and R retry reset the current level and preserve the selected weapon', async ({
+  page,
+}) => {
+  await startControlled(page);
+  await page.keyboard.press('2');
+  await fireControlled(page);
+  const ended = await advanceUntil(page, (state) => state.phase === 'over', 45);
+  await expect(page.getByRole('dialog', { name: '防线失守' })).toBeVisible();
+  expect(ended.hp).toBe(0);
+  expect(ended.firing).toBe(false);
+  await expect(page.locator('#result-kills')).toHaveText(String(ended.kills));
+  await page.clock.fastForward(5_000);
+  expect((await snapshot(page)).elapsed).toBe(ended.elapsed);
+  await page.keyboard.press('r');
+  expectFreshLevel(await snapshot(page), 1, 'sniper');
+  await page.clock.fastForward(250);
+  const playing = await snapshot(page);
+  expect(playing.elapsed).toBeCloseTo(0.25, 5);
+  expect(playing.shots).toBe(0);
+  expect(playing.zombies).toHaveLength(playing.spawned);
+});
+
+test('clear level one, advance to level two, and retry that level after defeat', async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  await startControlled(page);
+  await page.keyboard.press('2');
+  let holding = false;
+  try {
+    for (let frame = 0; frame < (LEVELS[0].duration + 45) * 4; frame++) {
+      const state = await snapshot(page);
+      if (state.phase === 'cleared') break;
+      expect(state.phase, 'The defender must survive the first level').toBe('playing');
+      const target = await nearestTarget(page);
+      if (target) {
+        await page.mouse.move(target.x, target.y);
+        if (!holding) {
+          await page.mouse.down();
+          holding = true;
+        }
+      } else {
+        if (holding) {
+          await page.mouse.up();
+          holding = false;
+        }
+        if (
+          state.reloadRemaining === 0 &&
+          state.ammo[state.weapon] < WEAPONS[state.weapon].magazine
+        ) {
+          await page.keyboard.press('r');
+        }
+      }
+      await page.clock.fastForward(250);
+    }
+  } finally {
+    await page.mouse.up();
+  }
+  await expect(page.getByRole('dialog', { name: '关卡完成' })).toBeVisible();
+  const cleared = await snapshot(page);
+  expect(cleared.kills).toBe(levelTotal(LEVELS[0]));
+  expect(cleared.spawned).toBe(levelTotal(LEVELS[0]));
+  expect(cleared.zombies.filter((zombie) => zombie.hp > 0)).toHaveLength(0);
+  expect(cleared.firing).toBe(false);
+  await page.clock.fastForward(5_000);
+  const stillCleared = await snapshot(page);
+  expect(stillCleared.elapsed).toBe(cleared.elapsed);
+  expect(stillCleared.spawned).toBe(cleared.spawned);
+  await page.getByRole('button', { name: '下一关', exact: true }).click();
+  expectFreshLevel(await snapshot(page), 2, 'sniper');
+  await advanceUntil(page, (state) => state.phase === 'over', 45);
+  await expect(page.getByRole('dialog', { name: '防线失守' })).toBeVisible();
+  await page.getByRole('button', { name: '重试本关', exact: true }).click();
+  expectFreshLevel(await snapshot(page), 2, 'sniper');
+});
 
 test.describe('phone viewport', () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
@@ -255,6 +438,12 @@ test.describe('phone viewport', () => {
     await page.getByRole('button', { name: '进入战斗' }).tap();
     await expect(page.locator('body')).toHaveAttribute('data-phase', 'playing');
     await expectNoHorizontalOverflow();
+    await page.getByRole('button', { name: '狙击枪', exact: true }).tap();
+    await expect(page.getByRole('button', { name: '狙击枪', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await page.getByRole('button', { name: '步枪', exact: true }).tap();
 
     const target = await nearestTarget(page);
     const session = await context.newCDPSession(page);
@@ -269,6 +458,8 @@ test.describe('phone viewport', () => {
     expect(released.hits).toBeGreaterThan(0);
     await page.waitForTimeout(350);
     expect((await snapshot(page)).shots).toBe(released.shots);
+    await page.getByRole('button', { name: '装填弹匣' }).tap();
+    expect((await snapshot(page)).reloadRemaining).toBeGreaterThan(0);
     await page.getByRole('button', { name: '暂停游戏' }).tap();
     await expect(page.getByRole('dialog', { name: '行动暂停' })).toBeVisible();
     await expectNoHorizontalOverflow();
