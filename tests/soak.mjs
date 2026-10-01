@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
 import { createServer } from 'vite';
+import { readBattle, applyBattleInput, buySupplies } from './campaign.mjs';
 
 const duration = Number(process.env.SOAK_SECONDS ?? 300);
 assert(Number.isFinite(duration) && duration > 0, 'SOAK_SECONDS must be positive');
 const errors = [];
 const samples = [];
+const purchases = [];
+const encounteredBosses = new Set();
 let server;
 let browser;
 let retries = 0;
@@ -15,6 +18,8 @@ let highestLevel = 1;
 let finishedShots = 0;
 let finishedKills = 0;
 let finishedElapsed = 0;
+let finishedEarned = 0;
+let defeatedBosses = 0;
 let lastState;
 
 try {
@@ -38,33 +43,27 @@ try {
   await page.goto(inspectUrl.href);
   await page.waitForFunction(() => Boolean(window.__game));
   const definitions = await page.evaluate(async () => {
-    const { LEVELS, WEAPONS, RULES, levelTotal } = await import('/src/game/types.ts');
-    return { totals: LEVELS.map(levelTotal), weapons: WEAPONS, rules: RULES };
+    const { LEVELS, WEAPONS, RULES, BOSSES, levelTotal } = await import('/src/game/types.ts');
+    return { totals: LEVELS.map(levelTotal), weapons: WEAPONS, rules: RULES, bosses: BOSSES };
   });
   await page.getByRole('button', { name: '进入战斗' }).click();
   const started = Date.now();
   let nextSample = started;
-  let holding = false;
+  const control = { holding: false };
 
   while (Date.now() - started < duration * 1_000) {
-    const { state, target } = await page.evaluate(() => {
-      const state = window.__game.snapshot();
-      const nearest = state.zombies
-        .filter((zombie) => zombie.hp > 0)
-        .sort(
-          (a, b) =>
-            Math.hypot(a.x - state.player.x, a.z - state.player.z) -
-            Math.hypot(b.x - state.player.x, b.z - state.player.z),
-        )[0];
-      return { state, target: nearest ? window.__game.project(nearest) : null };
-    });
+    const battle = await readBattle(page);
+    const { state } = battle;
     lastState = state;
+    if (state.boss?.hp > 0) encounteredBosses.add(state.boss.kind);
     highestLevel = Math.max(highestLevel, state.level);
     if (Date.now() >= nextSample) {
       const sample = {
         second: Math.round((Date.now() - started) / 1_000),
         level: state.level,
         phase: state.phase,
+        bossHp: state.boss?.hp ?? null,
+        coins: state.progress.coins,
         fps: state.fps,
         ammo: state.ammo[state.weapon],
         reloadRemaining: state.reloadRemaining,
@@ -85,8 +84,15 @@ try {
         sample.corpses <= definitions.rules.maxZombies * 2,
         `Corpses are not being recycled: ${sample.corpses}`,
       );
-      assert(sample.effects <= 61, `Effect pool capacity exceeded: ${sample.effects}`);
-      assert(state.hp >= 0 && state.hp <= definitions.rules.maxHp, `Invalid health: ${state.hp}`);
+      assert(sample.effects <= 77, `Effect pool capacity exceeded: ${sample.effects}`);
+      assert(state.hp >= 0 && state.hp <= state.maxHp, `Invalid health: ${state.hp}`);
+      assert(
+        Number.isSafeInteger(state.progress.coins) &&
+          state.progress.coins >= 0 &&
+          state.progress.coins <= 1_000_000_000,
+        'Invalid coin balance',
+      );
+      assert(state.progress.armor >= 0 && state.progress.armor <= 60, 'Invalid armor');
       assert(state.spawned <= definitions.totals[state.level - 1], 'Level spawn quota exceeded');
       assert(
         state.reloadRemaining >= 0 &&
@@ -103,16 +109,30 @@ try {
         state.zombies.every((zombie) => Number.isFinite(zombie.x) && Number.isFinite(zombie.z)),
         'Zombie position is not finite',
       );
+      if (state.boss) {
+        assert(
+          Number.isFinite(state.boss.x) && Number.isFinite(state.boss.z),
+          'Boss position is not finite',
+        );
+        assert(state.boss.hp >= 0 && state.boss.hp <= state.boss.maxHp, 'Invalid boss health');
+        assert(
+          state.boss.parts.every((part) => part.hp >= 0 && part.hp <= part.maxHp),
+          'Invalid weakpoint health',
+        );
+      }
       if (sample.second % 30 === 0) console.log(JSON.stringify({ progress: sample }));
       nextSample += 1_000;
     }
 
     if (state.phase === 'over' || state.phase === 'cleared' || state.phase === 'victory') {
       await page.mouse.up();
-      holding = false;
+      control.holding = false;
       finishedShots += state.shots;
       finishedKills += state.kills;
       finishedElapsed += state.elapsed;
+      finishedEarned += state.earnedCoins;
+      if (state.boss?.hp === 0) defeatedBosses++;
+      await buySupplies(page, purchases);
       if (state.phase === 'over') {
         retries++;
         await page.getByRole('button', { name: '重试本关', exact: true }).click();
@@ -123,6 +143,11 @@ try {
           'A level cleared before every enemy was killed',
         );
         clearedLevels++;
+        const expectedBoss = Object.values(definitions.bosses).find(
+          (boss) => boss.level === state.level,
+        );
+        if (expectedBoss)
+          assert.equal(state.boss?.hp, 0, 'A boss level cleared with a living boss');
         if (state.phase === 'victory') {
           victories++;
           await page.getByRole('button', { name: '重新出击', exact: true }).click();
@@ -132,20 +157,8 @@ try {
       }
     } else if (state.phase === 'paused') {
       throw new Error('The soak session unexpectedly paused');
-    } else if (target) {
-      await page.mouse.move(target.x, target.y);
-      if (!holding) {
-        await page.mouse.down();
-        holding = true;
-      }
     } else {
-      if (holding) {
-        await page.mouse.up();
-        holding = false;
-      }
-      if (state.reloadRemaining === 0 && state.ammo.rifle < definitions.weapons.rifle.magazine) {
-        await page.keyboard.press('r');
-      }
+      await applyBattleInput(page, battle, control, definitions.weapons);
     }
     await page.waitForTimeout(100);
   }
@@ -177,13 +190,26 @@ try {
     clearedLevels,
     victories,
     highestLevel,
+    defeatedBosses,
+    encounteredBosses: [...encounteredBosses],
+    purchases,
+    totalEarned: finishedEarned + lastState.earnedCoins,
+    totalSpent: purchases.reduce((sum, purchase) => sum + purchase.price, 0),
+    finalProgress: lastState.progress,
     shots: finishedShots + lastState.shots,
     kills: finishedKills + lastState.kills,
     errors,
   };
   console.log(JSON.stringify(summary, null, 2));
   assert.equal(errors.length, 0, 'Browser reported errors');
+  assert.equal(
+    summary.totalEarned - summary.totalSpent,
+    lastState.progress.coins,
+    'Coins must reconcile with earned rewards and purchases across levels and retries',
+  );
   assert(summary.shots > 0 && summary.kills > 0, 'The soak run must exercise shooting and kills');
+  if (duration >= 300)
+    assert(encounteredBosses.size > 0, 'A five minute soak must exercise a boss encounter');
 } finally {
   await browser?.close();
   await server?.close();

@@ -1,9 +1,16 @@
 import {
+  BOSS_PART_RADIUS,
+  BOSSES,
+  KILL_REWARDS,
+  LEVEL_REWARDS,
   LEVELS,
   RULES,
   WEAPONS,
   ZOMBIES,
   levelTotal,
+  bossPartPosition,
+  type Boss,
+  type BossKind,
   type GameEvent,
   type GameInput,
   type GameState,
@@ -12,11 +19,28 @@ import {
   type Zombie,
   type ZombieKind,
 } from './types';
+import {
+  createProgress,
+  getDamageMultiplier,
+  getMaxHp,
+  getReloadMultiplier,
+  MAX_COINS,
+  purchase as buyItem,
+  type Progress,
+  type ShopItemId,
+} from './economy';
 
 const EPSILON = 1e-8;
 const MAX_STEP = 1 / 60;
 type Spawn = Point & { kind: ZombieKind };
 type Batch = { at: number; kinds: ZombieKind[] };
+type Target = {
+  entity: Zombie | Boss;
+  at: Point;
+  radius: number;
+  part?: Boss['parts'][number];
+  blocked?: boolean;
+};
 
 export class Simulation {
   readonly state: GameState;
@@ -26,16 +50,24 @@ export class Simulation {
   private nextBatch = 0;
   private pending: Spawn[] = [];
 
-  constructor(private readonly random: () => number = Math.random) {
+  constructor(
+    private readonly random: () => number = Math.random,
+    progress: Progress = createProgress(),
+  ) {
     this.state = {
       phase: 'ready',
       player: { x: RULES.playerX, z: RULES.playerZ },
-      hp: RULES.maxHp,
+      hp: getMaxHp(progress),
+      maxHp: getMaxHp(progress),
+      progress,
+      earnedCoins: 0,
+      invulnerable: 0,
       kills: 0,
       elapsed: 0,
       shots: 0,
       hits: 0,
       zombies: [],
+      boss: null,
       level: 1,
       spawned: 0,
       weapon: 'rifle',
@@ -82,8 +114,28 @@ export class Simulation {
       this.state.ammo[weapon] === WEAPONS[weapon].magazine
     )
       return [];
-    this.state.reloadRemaining = WEAPONS[weapon].reloadTime;
+    this.state.reloadRemaining =
+      WEAPONS[weapon].reloadTime * getReloadMultiplier(this.state.progress);
     return [{ type: 'reload', weapon }];
+  }
+
+  purchase(item: ShopItemId): boolean {
+    if (!['ready', 'cleared', 'victory', 'over'].includes(this.state.phase)) return false;
+    if (!buyItem(this.state.progress, item)) return false;
+    this.state.maxHp = getMaxHp(this.state.progress);
+    return true;
+  }
+
+  useMedkit(): GameEvent[] {
+    if (
+      this.state.phase !== 'playing' ||
+      this.state.hp >= this.state.maxHp ||
+      this.state.progress.medkits === 0
+    )
+      return [];
+    this.state.progress.medkits--;
+    this.state.hp = Math.min(this.state.maxHp, this.state.hp + 50);
+    return [{ type: 'heal' }];
   }
 
   pause(): void {
@@ -122,12 +174,16 @@ export class Simulation {
     Object.assign(this.state, {
       phase: 'playing',
       player: { x: RULES.playerX, z: RULES.playerZ },
-      hp: RULES.maxHp,
+      hp: getMaxHp(this.state.progress),
+      maxHp: getMaxHp(this.state.progress),
+      earnedCoins: 0,
+      invulnerable: 0,
       kills: 0,
       elapsed: 0,
       shots: 0,
       hits: 0,
       zombies: [],
+      boss: null,
       level,
       spawned: 3,
       weapon,
@@ -172,6 +228,8 @@ export class Simulation {
 
   private advance(dt: number, input: GameInput, events: GameEvent[]): void {
     this.state.elapsed += dt;
+    this.state.invulnerable = Math.max(0, this.state.invulnerable - dt);
+    this.spawnBoss();
     if (this.state.reloadRemaining > 0) {
       this.state.reloadRemaining = Math.max(0, this.state.reloadRemaining - dt);
       if (this.state.reloadRemaining <= EPSILON) {
@@ -213,29 +271,100 @@ export class Simulation {
         zombie.attackCooldown <= EPSILON
       ) {
         zombie.attackCooldown = RULES.attackInterval;
-        this.state.hp = Math.max(0, this.state.hp - RULES.attackDamage);
-        events.push({ type: 'hurt', hp: this.state.hp });
-        if (this.state.hp === 0) {
-          this.state.phase = 'over';
-          events.push({ type: 'over' });
-          break;
-        }
+        this.damagePlayer(RULES.attackDamage, events);
+        if (this.state.phase === 'over') break;
       }
     }
     this.state.zombies = this.state.zombies.filter(
       (zombie) => zombie.hp > 0 || zombie.deadTime < RULES.corpseLifetime - EPSILON,
     );
     if (this.state.phase === 'over') return;
+    this.advanceBoss(dt, events);
+    if (this.state.hp === 0) return;
     this.separateZombies();
     this.spawnDue();
     if (
       this.state.spawned === levelTotal(LEVELS[this.state.level - 1]) &&
-      !this.state.zombies.some((zombie) => zombie.hp > 0)
+      !this.state.zombies.some((zombie) => zombie.hp > 0) &&
+      (!this.bossKind() || this.state.boss?.hp === 0)
     ) {
       const final = this.state.level === LEVELS.length;
       this.state.phase = final ? 'victory' : 'cleared';
+      this.awardCoins(LEVEL_REWARDS[this.state.level - 1], events);
       events.push({ type: 'clear', level: this.state.level, final });
     }
+  }
+
+  private bossKind(): BossKind | undefined {
+    return (Object.keys(BOSSES) as BossKind[]).find(
+      (kind) => BOSSES[kind].level === this.state.level,
+    );
+  }
+
+  private spawnBoss(): void {
+    const kind = this.bossKind();
+    if (!kind || this.state.boss || this.state.elapsed + EPSILON < BOSSES[kind].spawnAt) return;
+    const definition = BOSSES[kind];
+    this.state.boss = {
+      kind,
+      x: 0,
+      z: -18,
+      hp: definition.hp,
+      maxHp: definition.hp,
+      parts: kind === 'brood' ? [0, 1, 2].map((id) => ({ id, hp: 240, maxHp: 240 })) : [],
+      attackRemaining: definition.attackInterval,
+      deadTime: -1,
+      hitTime: 0,
+    };
+  }
+
+  private advanceBoss(dt: number, events: GameEvent[]): void {
+    const boss = this.state.boss;
+    if (!boss) return;
+    boss.hitTime = Math.max(0, boss.hitTime - dt);
+    if (boss.hp <= 0) {
+      boss.deadTime += dt;
+      return;
+    }
+    const definition = BOSSES[boss.kind];
+    if (boss.z < definition.stopZ) {
+      boss.z = Math.min(definition.stopZ, boss.z + definition.speed * dt);
+      return;
+    }
+    const before = boss.attackRemaining;
+    boss.attackRemaining -= dt;
+    if (before > 2 + EPSILON && boss.attackRemaining <= 2 + EPSILON)
+      events.push({ type: 'bossWarning' });
+    if (boss.attackRemaining <= EPSILON) {
+      boss.attackRemaining += definition.attackInterval;
+      this.damagePlayer(definition.attackDamage, events);
+    }
+  }
+
+  private damagePlayer(damage: number, events: GameEvent[]): void {
+    if (this.state.invulnerable > EPSILON) return;
+    const absorbed = Math.min(this.state.progress.armor, damage);
+    this.state.progress.armor -= absorbed;
+    this.state.hp = Math.max(0, this.state.hp - (damage - absorbed));
+    events.push({ type: 'hurt', hp: this.state.hp });
+    if (this.state.hp > 0) return;
+    if (this.state.progress.revive) {
+      this.state.progress.revive = false;
+      this.state.hp = this.state.maxHp;
+      this.state.invulnerable = 3;
+      events.push({ type: 'revive' });
+    } else {
+      this.state.phase = 'over';
+      events.push({ type: 'over' });
+    }
+  }
+
+  private awardCoins(amount: number, events: GameEvent[], at?: Point): void {
+    const credited = Math.min(amount, MAX_COINS - this.state.progress.coins);
+    if (credited <= 0) return;
+    this.state.progress.coins += credited;
+    this.state.earnedCoins += credited;
+    events.push({ type: 'coins', amount: credited, ...(at ? { at } : {}) });
   }
 
   private spawnDue(): void {
@@ -280,68 +409,115 @@ export class Simulation {
     };
   }
 
-  private intersection(zombie: Zombie, direction: Point): number | null {
-    const dx = zombie.x - this.state.player.x;
-    const dz = zombie.z - this.state.player.z;
+  private intersection(at: Point, radius: number, direction: Point): number | null {
+    const dx = at.x - this.state.player.x;
+    const dz = at.z - this.state.player.z;
     const along = dx * direction.x + dz * direction.z;
     const perpendicularSquared = dx * dx + dz * dz - along * along;
-    if (perpendicularSquared > zombie.radius * zombie.radius) return null;
-    const halfChord = Math.sqrt(Math.max(0, zombie.radius * zombie.radius - perpendicularSquared));
+    if (perpendicularSquared > radius * radius) return null;
+    const halfChord = Math.sqrt(Math.max(0, radius * radius - perpendicularSquared));
     return along + halfChord < 0 ? null : Math.max(0, along - halfChord);
   }
 
-  private shoot(aim: Point, events: GameEvent[]): void {
-    const { weapon } = this.state;
+  private targetDistance(at: Point, radius: number, direction: Point): number | null {
+    const definition = WEAPONS[this.state.weapon];
+    if (this.state.weapon !== 'shotgun') {
+      const distance = this.intersection(at, radius, direction);
+      return distance !== null && distance <= definition.range ? distance : null;
+    }
+    const dx = at.x - this.state.player.x;
+    const dz = at.z - this.state.player.z;
+    const distance = Math.hypot(dx, dz);
+    return distance <= definition.range + EPSILON &&
+      dx * direction.x + dz * direction.z >= distance * Math.cos(definition.halfAngle) - EPSILON
+      ? distance
+      : null;
+  }
+
+  private shoot(aim: GameInput['aim'], events: GameEvent[]): void {
+    const { weapon, boss } = this.state;
     const definition = WEAPONS[weapon];
-    const from = { ...this.state.player };
+    const from = { ...this.state.player, ...(aim.y === undefined ? {} : { y: 1.5 }) };
     const length = Math.hypot(aim.x - from.x, aim.z - from.z);
     const direction = { x: (aim.x - from.x) / length, z: (aim.z - from.z) / length };
-    let targets: Zombie[];
-    let hitDistance: number = definition.range;
-    if (weapon === 'shotgun') {
-      targets = this.state.zombies.filter((zombie) => {
-        if (zombie.hp <= 0) return false;
-        const dx = zombie.x - from.x;
-        const dz = zombie.z - from.z;
-        const distance = Math.hypot(dx, dz);
-        return (
-          distance <= definition.range + EPSILON &&
-          dx * direction.x + dz * direction.z >= distance * Math.cos(definition.halfAngle) - EPSILON
-        );
-      });
-    } else {
-      const intersections = this.state.zombies
-        .filter((zombie) => zombie.hp > 0)
-        .map((zombie) => ({ zombie, distance: this.intersection(zombie, direction) }))
-        .filter(
-          (hit): hit is { zombie: Zombie; distance: number } =>
-            hit.distance !== null && hit.distance <= definition.range,
-        )
-        .sort((a, b) => a.distance - b.distance)
-        .slice(0, definition.penetration);
-      targets = intersections.map((hit) => hit.zombie);
-      if (intersections.length === definition.penetration)
-        hitDistance = intersections.at(-1)!.distance;
+    const candidates: Target[] = this.state.zombies
+      .filter((zombie) => zombie.hp > 0)
+      .map((zombie) => ({
+        entity: zombie,
+        at: { x: zombie.x, z: zombie.z },
+        radius: zombie.radius,
+      }));
+    if (boss && boss.hp > 0) {
+      const part = boss.parts.find((part) => part.id === aim.bossPart && part.hp > 0);
+      const partAt = part ? bossPartPosition(boss, part.id) : null;
+      if (part && partAt && this.targetDistance(partAt, BOSS_PART_RADIUS, direction) !== null) {
+        candidates.push({ entity: boss, at: partAt, radius: BOSS_PART_RADIUS, part });
+      } else {
+        candidates.push({
+          entity: boss,
+          at: { x: boss.x, z: boss.z, y: 1.5 },
+          radius: BOSSES[boss.kind].radius,
+          blocked:
+            boss.kind === 'brood' &&
+            (aim.bossPart !== undefined || boss.parts.some((part) => part.hp > 0)),
+        });
+      }
     }
+    let intersections = candidates
+      .map((target) => ({
+        target,
+        distance: this.targetDistance(target.at, target.radius, direction),
+      }))
+      .filter((hit): hit is { target: Target; distance: number } => hit.distance !== null)
+      .sort((a, b) => a.distance - b.distance);
+    if (weapon !== 'shotgun') intersections = intersections.slice(0, definition.penetration);
+    const hitDistance =
+      weapon !== 'shotgun' && intersections.length === definition.penetration
+        ? intersections.at(-1)!.distance
+        : definition.range;
     this.state.ammo[weapon]--;
     this.state.shots++;
-    if (targets.length) this.state.hits++;
+    if (intersections.length) this.state.hits++;
     events.push({
       type: 'shot',
       weapon,
       from,
-      to: { x: from.x + direction.x * hitDistance, z: from.z + direction.z * hitDistance },
-      hit: targets.length > 0,
+      to: {
+        x: from.x + direction.x * hitDistance,
+        z: from.z + direction.z * hitDistance,
+        ...(aim.y === undefined ? {} : { y: 1.5 + ((aim.y - 1.5) * hitDistance) / length }),
+      },
+      hit: intersections.length > 0,
     });
-    for (const zombie of targets) {
-      zombie.hp = Math.max(0, zombie.hp - definition.damage);
-      zombie.hitTime = 0.16;
-      const killed = zombie.hp === 0;
-      if (killed) {
-        zombie.deadTime = 0;
-        this.state.kills++;
+    const damage = definition.damage * getDamageMultiplier(this.state.progress, weapon);
+    for (const { target } of intersections) {
+      const { entity, at, part, blocked } = target;
+      entity.hitTime = 0.16;
+      if (blocked) {
+        events.push({ type: 'hit', at, killed: false });
+        continue;
       }
-      events.push({ type: 'hit', at: { x: zombie.x, z: zombie.z }, killed });
+      if ('parts' in entity) {
+        if (part) {
+          part.hp = Math.max(0, part.hp - damage);
+          if (part.hp === 0) events.push({ type: 'bossBreak', at, part: part.id });
+        } else {
+          const multiplier = entity.kind === 'bulwark' ? (weapon === 'sniper' ? 1.5 : 0.5) : 1;
+          entity.hp = Math.max(0, entity.hp - damage * multiplier);
+          if (entity.hp === 0) {
+            entity.deadTime = 0;
+            this.awardCoins(BOSSES[entity.kind].reward, events, at);
+          }
+        }
+      } else {
+        entity.hp = Math.max(0, entity.hp - damage);
+        if (entity.hp === 0) {
+          entity.deadTime = 0;
+          this.state.kills++;
+          this.awardCoins(KILL_REWARDS[entity.kind], events, at);
+        }
+      }
+      events.push({ type: 'hit', at: { ...at }, killed: entity.hp === 0 });
     }
   }
 

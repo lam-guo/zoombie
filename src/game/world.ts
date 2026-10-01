@@ -1,6 +1,7 @@
 import * as THREE from 'three';
-import { LEVELS, WEAPONS, WEAPON_IDS, ZOMBIES } from './types';
-import type { GameEvent, GameState, Point, WeaponId, Zombie } from './types';
+import { BOSSES, bossPartPosition, LEVELS, WEAPONS, WEAPON_IDS, ZOMBIES } from './types';
+import type { Boss, BossKind, GameEvent, GameState, Point, WeaponId, Zombie } from './types';
+import { getReloadMultiplier } from './economy';
 
 type Actor = {
   root: THREE.Group;
@@ -21,6 +22,15 @@ type Effect = {
   life: number;
   duration: number;
   velocity: THREE.Vector3;
+};
+
+type BossModel = {
+  root: THREE.Group;
+  body: THREE.Group;
+  limbs: THREE.Group[];
+  armor: THREE.MeshStandardMaterial;
+  core: THREE.Mesh;
+  parts: Map<number, THREE.Group>;
 };
 
 const UP = new THREE.Vector3(0, 1, 0);
@@ -50,6 +60,12 @@ export class World {
   private readonly spareActors: Actor[] = [];
   private readonly tracers: Effect[] = [];
   private readonly sparks: Effect[] = [];
+  private readonly coins: Effect[] = [];
+  private readonly bosses = new Map<BossKind, BossModel>();
+  private boss: Boss | null = null;
+  private readonly bossWarning = new THREE.Group();
+  private readonly recoveryRing = new THREE.Group();
+  private recoveryTime = 0;
   private readonly aimOccluders: THREE.Object3D[] = [];
   private readonly player: Actor;
   private readonly weapons = new Map<WeaponId, THREE.Group>();
@@ -153,6 +169,7 @@ export class World {
     this.aimLine.frustumCulled = false;
     this.scene.add(this.aimLine);
     this.buildEffects();
+    this.buildBosses();
     this.resize();
   }
 
@@ -163,6 +180,7 @@ export class World {
       effects:
         this.tracers.filter((effect) => effect.life > 0).length +
         this.sparks.filter((effect) => effect.life > 0).length +
+        this.coins.filter((effect) => effect.life > 0).length +
         Number(this.flashTime > 0),
     };
   }
@@ -749,6 +767,176 @@ export class World {
       this.scene.add(mesh);
       this.sparks.push({ mesh, life: 0, duration: 0.35, velocity: new THREE.Vector3() });
     }
+    for (let i = 0; i < 16; i++) {
+      const mesh = new THREE.Mesh(
+        this.cylinder,
+        this.material(
+          new THREE.MeshBasicMaterial({
+            color: '#f4d877',
+            transparent: true,
+            depthWrite: false,
+          }),
+        ),
+      );
+      mesh.scale.set(0.15, 0.045, 0.15);
+      mesh.visible = false;
+      this.scene.add(mesh);
+      this.coins.push({ mesh, life: 0, duration: 0.8, velocity: new THREE.Vector3() });
+    }
+  }
+
+  private buildBosses(): void {
+    const dark = this.surface('#273631', 0.8, 0.35);
+    const bone = this.surface('#b5ad87');
+    const weakRing = this.geometry(new THREE.TorusGeometry(0.58, 0.045, 6, 24));
+    const glow = this.material(new THREE.MeshBasicMaterial({ color: '#d5fbaa' }));
+    const shell = (
+      parent: THREE.Object3D,
+      material: THREE.Material,
+      x: number,
+      y: number,
+      z: number,
+      sx: number,
+      sy: number,
+      sz: number,
+    ): THREE.Mesh => {
+      const mesh = new THREE.Mesh(this.sphere, material);
+      mesh.position.set(x, y, z);
+      mesh.scale.set(sx, sy, sz);
+      mesh.receiveShadow = true;
+      parent.add(mesh);
+      return mesh;
+    };
+    for (const kind of ['bulwark', 'brood'] as const) {
+      const root = new THREE.Group();
+      const body = new THREE.Group();
+      const limbs: THREE.Group[] = [];
+      const parts = new Map<number, THREE.Group>();
+      const armor = this.surface(kind === 'bulwark' ? '#85745b' : '#536d61', 0.65, 0.25);
+      root.add(body);
+      root.userData.boss = true;
+      root.visible = false;
+      const core = shell(
+        body,
+        this.material(new THREE.MeshBasicMaterial({ color: '#f1b166' })),
+        0,
+        kind === 'bulwark' ? 2.5 : 1.4,
+        kind === 'bulwark' ? 0.77 : 1.5,
+        kind === 'bulwark' ? 0.36 : 0.58,
+        0.28,
+        0.2,
+      );
+      if (kind === 'bulwark') {
+        this.box(body, dark, 0, 1.95, 0, 1.65, 1.7, 1.1, false);
+        this.box(body, armor, 0, 2.25, 0.5, 1.88, 1.35, 0.44, false);
+        this.box(body, armor, 0, 3.24, 0.1, 0.87, 0.83, 0.86, false);
+        this.box(body, dark, 0, 3.07, 0.56, 0.66, 0.18, 0.15, false);
+        this.box(
+          body,
+          this.material(new THREE.MeshBasicMaterial({ color: '#efb875' })),
+          0,
+          3.34,
+          0.55,
+          0.58,
+          0.065,
+          0.08,
+          false,
+        );
+        for (const side of [-1, 1]) {
+          const arm = new THREE.Group();
+          arm.position.set(side * 1.32, 2.6, 0);
+          this.box(arm, armor, 0, 0, 0, 1.0, 0.85, 1.16, false);
+          this.box(arm, dark, side * 0.12, -0.65, 0.12, 0.58, 1.1, 0.65, false);
+          this.box(arm, armor, side * 0.12, -1.18, 0.28, 0.74, 0.66, 0.87, false);
+          this.box(arm, bone, 0, 0.48, 0.12, 0.18, 0.14, 0.65, false);
+          body.add(arm);
+          limbs.push(arm);
+          const leg = new THREE.Group();
+          leg.position.set(side * 0.6, 1.1, 0);
+          this.box(leg, dark, 0, -0.35, 0, 0.62, 0.85, 0.65, false);
+          this.box(leg, armor, 0, -0.86, 0.23, 0.75, 0.43, 0.96, false);
+          body.add(leg);
+          limbs.push(leg);
+          this.box(body, bone, side * 0.48, 2.55, 0.745, 0.15, 0.33, 0.06, false);
+        }
+      } else {
+        shell(body, armor, 0, 1.45, -0.1, 1.65, 1.0, 1.75);
+        shell(body, dark, 0, 1.08, 1.02, 1.0, 0.6, 0.74);
+        for (const side of [-1, 1]) {
+          for (let i = 0; i < 3; i++) {
+            const leg = new THREE.Group();
+            leg.position.set(side * 1.13, 1.15, -0.95 + i * 0.92);
+            const upper = this.box(leg, armor, side * 0.53, -0.03, 0, 1.32, 0.28, 0.32, false);
+            upper.rotation.z = side * 0.19;
+            const lower = this.box(leg, dark, side * 1.06, -0.5, 0.11, 0.24, 1.14, 0.28, false);
+            lower.rotation.z = side * 0.23;
+            this.box(leg, bone, side * 1.18, -1.02, 0.26, 0.28, 0.13, 0.52, false);
+            body.add(leg);
+            limbs.push(leg);
+          }
+          const fang = this.box(body, bone, side * 0.51, 0.68, 1.58, 0.16, 0.66, 0.23, false);
+          fang.rotation.z = side * 0.4;
+        }
+        for (let id = 0; id < 3; id++) {
+          const part = new THREE.Group();
+          shell(part, glow, 0, 0, 0, 0.49, 0.49, 0.49);
+          const rim = new THREE.Mesh(weakRing, glow);
+          rim.rotation.x = -Math.PI / 4;
+          part.add(rim);
+          part.traverse((object) => {
+            object.userData.bossPart = id;
+          });
+          root.add(part);
+          parts.set(id, part);
+        }
+      }
+      const shadow = new THREE.Mesh(this.plane, this.shadowMaterial);
+      shadow.rotation.x = -Math.PI / 2;
+      shadow.position.y = 0.03;
+      shadow.scale.set(kind === 'bulwark' ? 4.5 : 5.5, 4.2, 1);
+      root.add(shadow);
+      root.traverse((object) => {
+        if (object instanceof THREE.Mesh) object.castShadow = false;
+      });
+      this.scene.add(root);
+      this.bosses.set(kind, { root, body, limbs, armor, core, parts });
+    }
+    const warningMaterial = this.material(
+      new THREE.MeshBasicMaterial({
+        color: '#ef795f',
+        transparent: true,
+        opacity: 0.65,
+        depthWrite: false,
+      }),
+    );
+    for (const [inner, outer] of [
+      [2.4, 2.48],
+      [2.0, 2.06],
+    ]) {
+      const ring = new THREE.Mesh(
+        this.geometry(new THREE.RingGeometry(inner, outer, 56)),
+        warningMaterial,
+      );
+      ring.rotation.x = -Math.PI / 2;
+      this.bossWarning.add(ring);
+    }
+    this.bossWarning.visible = false;
+    this.scene.add(this.bossWarning);
+    const recovery = new THREE.Mesh(
+      this.geometry(new THREE.RingGeometry(0.85, 0.93, 40)),
+      this.material(
+        new THREE.MeshBasicMaterial({
+          color: '#b6edba',
+          transparent: true,
+          opacity: 0.6,
+          depthWrite: false,
+        }),
+      ),
+    );
+    recovery.rotation.x = -Math.PI / 2;
+    this.recoveryRing.add(recovery);
+    this.recoveryRing.visible = false;
+    this.scene.add(this.recoveryRing);
   }
 
   handleEvents(events: GameEvent[]): void {
@@ -774,6 +962,7 @@ export class World {
               facing - WEAPONS.shotgun.halfAngle + (i / 4) * WEAPONS.shotgun.halfAngle * 2;
             const to = {
               x: event.from.x + Math.sin(angle) * WEAPONS.shotgun.range,
+              y: event.to.y,
               z: event.from.z + Math.cos(angle) * WEAPONS.shotgun.range,
             };
             this.addTracer(origin, event.from, to, event.weapon, false);
@@ -782,23 +971,53 @@ export class World {
           this.addTracer(origin, event.from, event.to, event.weapon, event.hit);
         }
       } else if (event.type === 'hit') {
-        for (let i = 0; i < (event.killed ? 8 : 4); i++) {
-          const spark = this.sparks.find((effect) => effect.life <= 0);
-          if (!spark) break;
-          spark.mesh.position.set(event.at.x, 1.2, event.at.z);
-          spark.velocity.set(
-            (Math.random() - 0.5) * 3.5,
-            0.5 + Math.random() * 2.2,
-            (Math.random() - 0.5) * 3.5,
+        this.burst(event.at, event.killed ? 8 : 4, '#e4c587');
+      } else if (event.type === 'bossBreak') {
+        this.burst(event.at, 18, '#c9f4a0', 1.7);
+        this.trauma = 0.3;
+      } else if (event.type === 'coins') {
+        const at = event.at ?? this.player.root.position;
+        for (let i = 0; i < Math.min(6, Math.ceil(event.amount / 5)); i++) {
+          const coin = this.coins.find((effect) => effect.life <= 0);
+          if (!coin) break;
+          coin.mesh.position.set(at.x + (Math.random() - 0.5) * 0.4, (at.y ?? 0) + 1.1, at.z);
+          coin.mesh.rotation.set(Math.PI / 2, 0, Math.random() * Math.PI);
+          coin.velocity.set(
+            (Math.random() - 0.5) * 1.3,
+            1.6 + Math.random(),
+            (Math.random() - 0.5) * 1.3,
           );
-          spark.mesh.scale.setScalar(0.03 + Math.random() * 0.05);
-          spark.duration = 0.2 + Math.random() * 0.2;
-          spark.life = spark.duration;
-          spark.mesh.visible = true;
+          coin.life = coin.duration;
+          coin.mesh.visible = true;
         }
+      } else if (event.type === 'heal' || event.type === 'revive') {
+        this.recoveryTime = event.type === 'revive' ? 1.6 : 1;
+        this.burst(
+          { x: this.player.root.position.x, y: 0.6, z: this.player.root.position.z },
+          14,
+          '#b6edba',
+        );
       } else if (event.type === 'hurt') {
         this.trauma = 0.5;
       }
+    }
+  }
+
+  private burst(at: Point, count: number, color: string, size = 1): void {
+    for (let i = 0; i < count; i++) {
+      const spark = this.sparks.find((effect) => effect.life <= 0);
+      if (!spark) break;
+      spark.mesh.position.set(at.x, at.y ?? 1.2, at.z);
+      spark.velocity.set(
+        (Math.random() - 0.5) * 3.5,
+        0.5 + Math.random() * 2.2,
+        (Math.random() - 0.5) * 3.5,
+      );
+      spark.mesh.scale.setScalar((0.03 + Math.random() * 0.05) * size);
+      (spark.mesh.material as THREE.MeshBasicMaterial).color.set(color);
+      spark.duration = 0.2 + Math.random() * 0.2;
+      spark.life = spark.duration;
+      spark.mesh.visible = true;
     }
   }
 
@@ -809,7 +1028,7 @@ export class World {
     weapon: WeaponId,
     hit: boolean,
   ): void {
-    this.direction.set(to.x, hit ? 1.05 : 1.2, to.z).sub(origin);
+    this.direction.set(to.x, to.y ?? (hit ? 1.05 : 1.2), to.z).sub(origin);
     const forwardDistance = this.direction.x * (to.x - from.x) + this.direction.z * (to.z - from.z);
     // A point-blank hit can fall inside the barrel. Keep its hit feedback without a backwards tracer.
     if (forwardDistance <= 0) return;
@@ -880,8 +1099,67 @@ export class World {
     }
   }
 
+  private animateBoss(state: GameState): void {
+    this.boss = state.boss;
+    const boss = state.boss;
+    for (const [kind, model] of this.bosses)
+      model.root.visible = boss?.kind === kind && (boss.deadTime < 0 || boss.deadTime < 1.5);
+    this.bossWarning.visible = false;
+    if (!boss) return;
+    const model = this.bosses.get(boss.kind)!;
+    const dead = boss.hp <= 0;
+    const moving = boss.z < BOSSES[boss.kind].stopZ - 0.01;
+    const warning = !dead && !moving && boss.attackRemaining <= 2;
+    const windup = warning ? 1 - Math.max(0, boss.attackRemaining) / 2 : 0;
+    model.root.position.set(boss.x, 0, boss.z);
+    model.armor.emissive.set(boss.hitTime > 0 ? '#ccb97e' : '#000000');
+    model.armor.emissiveIntensity = Math.min(1, boss.hitTime * 7);
+    model.body.rotation.set(0, 0, 0);
+    model.body.scale.set(1, 1, 1);
+    model.body.position.y = dead ? 0 : Math.sin(this.time * 2.2) * 0.035;
+    const fall = dead ? Math.min(1, boss.deadTime / 0.8) : 0;
+    if (boss.kind === 'bulwark') {
+      model.body.rotation.x = -fall * 1.2;
+      model.body.position.y -= fall * 0.3;
+      model.limbs.forEach((limb, index) => {
+        limb.rotation.x = dead
+          ? 0
+          : index % 2 === 0
+            ? -windup * 1.3
+            : moving
+              ? Math.sin(this.time * 3 + index) * 0.28
+              : 0;
+      });
+    } else {
+      model.body.scale.y = 1 - fall * 0.8;
+      model.limbs.forEach((limb, index) => {
+        limb.rotation.x = dead
+          ? fall * 0.35
+          : moving
+            ? Math.sin(this.time * 5 + index * 1.7) * 0.16
+            : windup * 0.14;
+      });
+      const shielded = boss.parts.some((part) => part.hp > 0);
+      (model.core.material as THREE.MeshBasicMaterial).color.set(shielded ? '#536e5b' : '#ffc281');
+      for (const [id, partModel] of model.parts) {
+        const part = boss.parts.find((candidate) => candidate.id === id);
+        partModel.visible = !dead && Boolean(part && part.hp > 0);
+        const position = bossPartPosition(boss, id);
+        partModel.position.set(position.x - boss.x, position.y, position.z - boss.z);
+        partModel.scale.setScalar(1 + Math.sin(this.time * 3 + id) * 0.04);
+      }
+    }
+    this.bossWarning.visible = warning;
+    this.bossWarning.position.set(state.player.x, 0.075, state.player.z);
+    this.bossWarning.scale.setScalar(1 - windup * 0.22);
+    const warningMaterial = (this.bossWarning.children[0] as THREE.Mesh)
+      .material as THREE.MeshBasicMaterial;
+    warningMaterial.opacity = 0.42 + windup * 0.25 + Math.sin(this.time * 14) * 0.13;
+  }
+
   render(state: GameState, aim: Point, dt: number): void {
     this.time += dt;
+    this.animateBoss(state);
     if (this.currentLevel !== state.level) this.setLevel(state.level);
     if (this.currentWeapon !== state.weapon) this.setWeapon(state.weapon);
     const present = new Set(state.zombies.map((zombie) => zombie.id));
@@ -927,7 +1205,11 @@ export class World {
     if (state.phase === 'over')
       this.player.body.rotation.x = Math.min(0.9, this.player.body.rotation.x + 0.6);
     const reloadProgress =
-      state.reloadRemaining > 0 ? 1 - state.reloadRemaining / WEAPONS[state.weapon].reloadTime : 0;
+      state.reloadRemaining > 0
+        ? 1 -
+          state.reloadRemaining /
+            (WEAPONS[state.weapon].reloadTime * getReloadMultiplier(state.progress))
+        : 0;
     const reloadPose =
       state.reloadRemaining > 0 ? Math.sin(Math.PI * Math.max(0, Math.min(1, reloadProgress))) : 0;
     this.gun.rotation.set(-reloadPose * 0.22, 0, reloadPose * 0.42);
@@ -955,6 +1237,10 @@ export class World {
     const distances = this.aimLine.geometry.getAttribute('lineDistance') as THREE.BufferAttribute;
     distances.setX(1, Math.hypot(lineX - state.player.x, lineZ - state.player.z + 0.55));
     distances.needsUpdate = true;
+    this.recoveryTime = Math.max(0, this.recoveryTime - dt);
+    this.recoveryRing.visible = this.recoveryTime > 0 || state.invulnerable > 0;
+    this.recoveryRing.position.set(state.player.x, 0.08, state.player.z);
+    this.recoveryRing.scale.setScalar(1 + Math.sin(this.time * 7) * 0.1);
 
     for (const effect of this.tracers) {
       effect.life = Math.max(0, effect.life - dt);
@@ -969,6 +1255,15 @@ export class World {
       effect.velocity.y -= 7 * dt;
       (effect.mesh.material as THREE.MeshBasicMaterial).opacity = effect.life / effect.duration;
     }
+    for (const coin of this.coins) {
+      if (coin.life <= 0) continue;
+      coin.life = Math.max(0, coin.life - dt);
+      coin.mesh.visible = coin.life > 0;
+      coin.mesh.position.addScaledVector(coin.velocity, dt);
+      coin.velocity.y -= 1.8 * dt;
+      coin.mesh.rotation.z += dt * 6;
+      (coin.mesh.material as THREE.MeshBasicMaterial).opacity = Math.min(1, coin.life / 0.25);
+    }
     this.camera.position.copy(this.cameraPosition);
     this.camera.position.x += Math.sin(this.time * 87) * this.trauma * 0.1;
     this.camera.position.y += Math.cos(this.time * 73) * this.trauma * 0.055;
@@ -976,7 +1271,7 @@ export class World {
     this.renderer.render(this.scene, this.camera);
   }
 
-  screenToGround(clientX: number, clientY: number): Point | null {
+  screenToGround(clientX: number, clientY: number): (Point & { bossPart?: number }) | null {
     const rect = this.canvas.getBoundingClientRect();
     this.pointer.set(
       ((clientX - rect.left) / rect.width) * 2 - 1,
@@ -992,20 +1287,56 @@ export class World {
         if (object instanceof THREE.Mesh) targets.push(object);
       });
     }
+    const boss = this.boss;
+    if (boss && boss.hp > 0) {
+      this.bosses.get(boss.kind)!.root.traverseVisible((object) => {
+        if (
+          object instanceof THREE.Mesh &&
+          !Array.isArray(object.material) &&
+          !object.material.transparent
+        )
+          targets.push(object);
+      });
+    }
     const nearest = this.raycaster.intersectObjects(targets, false)[0];
     if (nearest) {
       let object = nearest.object;
       while (object.parent && object.parent !== this.scene) object = object.parent;
       const actor = this.actors.get(object.userData.zombieId as number);
       if (actor) return { x: actor.root.position.x, z: actor.root.position.z };
+      if (object.userData.boss && boss && boss.hp > 0) {
+        const part = nearest.object.userData.bossPart as number | undefined;
+        if (
+          part !== undefined &&
+          boss.parts.some((candidate) => candidate.id === part && candidate.hp > 0)
+        )
+          return bossPartPosition(boss, part);
+        return { x: boss.x, y: 1.5, z: boss.z };
+      }
     }
     if (!this.raycaster.ray.intersectPlane(this.ground, this.intersection)) return null;
     return { x: this.intersection.x, z: this.intersection.z };
   }
 
+  bossPartPositions(): { id: number; x: number; y: number; z: number }[] {
+    if (!this.boss || this.boss.hp <= 0) return [];
+    const model = this.bosses.get(this.boss.kind)!;
+    model.root.updateMatrixWorld(true);
+    return [...model.parts]
+      .filter(
+        ([id, part]) =>
+          part.visible &&
+          this.boss!.parts.some((candidate) => candidate.id === id && candidate.hp > 0),
+      )
+      .map(([id, part]) => {
+        part.getWorldPosition(this.vector);
+        return { id, x: this.vector.x, y: this.vector.y, z: this.vector.z };
+      });
+  }
+
   project(point: Point): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
-    this.vector.set(point.x, 0, point.z).project(this.camera);
+    this.vector.set(point.x, point.y ?? 0, point.z).project(this.camera);
     return {
       x: rect.left + (this.vector.x + 1) * 0.5 * this.width,
       y: rect.top + (1 - this.vector.y) * 0.5 * this.height,
@@ -1023,9 +1354,13 @@ export class World {
   }
 
   clearEffects(): void {
-    this.flashTime = this.recoil = this.trauma = 0;
+    this.flashTime = this.recoil = this.trauma = this.recoveryTime = 0;
     this.muzzle.visible = false;
-    for (const effect of [...this.tracers, ...this.sparks]) {
+    this.recoveryRing.visible = false;
+    this.bossWarning.visible = false;
+    this.boss = null;
+    for (const model of this.bosses.values()) model.root.visible = false;
+    for (const effect of [...this.tracers, ...this.sparks, ...this.coins]) {
       effect.life = 0;
       effect.mesh.visible = false;
     }

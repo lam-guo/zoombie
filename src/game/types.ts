@@ -1,6 +1,9 @@
+import type { Progress } from './economy';
+
 export interface Point {
   x: number;
   z: number;
+  y?: number;
 }
 export type WeaponId = 'rifle' | 'sniper' | 'shotgun';
 export type ZombieKind = 'normal' | 'tank' | 'runner' | 'small';
@@ -81,7 +84,7 @@ export const LEVELS: readonly LevelDefinition[] = [
   },
   {
     name: '重装压境',
-    subtitle: '重装者来袭。试试狙击的穿透。',
+    subtitle: '狙击重击能够克制重甲巨兽。',
     duration: 110,
     batchSize: 5,
     counts: { normal: 42, runner: 16, tank: 10, small: 0 },
@@ -97,7 +100,7 @@ export const LEVELS: readonly LevelDefinition[] = [
   },
   {
     name: '最后防线',
-    subtitle: '所有敌人混合来袭。把握换弹与切枪时机。',
+    subtitle: '先击破孵化主宰的三个发光弱点。',
     duration: 160,
     batchSize: 7,
     counts: { normal: 50, runner: 26, tank: 28, small: 16 },
@@ -106,6 +109,60 @@ export const LEVELS: readonly LevelDefinition[] = [
 ];
 export const levelTotal = (level: LevelDefinition): number =>
   Object.values(level.counts).reduce((sum, count) => sum + count, 0);
+
+export const KILL_REWARDS: Record<ZombieKind, number> = {
+  normal: 4,
+  runner: 5,
+  small: 6,
+  tank: 10,
+};
+export const LEVEL_REWARDS = [50, 80, 120, 160, 240] as const;
+export type BossKind = 'bulwark' | 'brood';
+export const BOSSES = {
+  bulwark: {
+    name: '重甲巨兽',
+    level: 3,
+    spawnAt: 70,
+    hp: 1600,
+    radius: 1.7,
+    speed: 1.6,
+    stopZ: 0,
+    attackInterval: 8,
+    attackDamage: 20,
+    reward: 150,
+  },
+  brood: {
+    name: '孵化主宰',
+    level: 5,
+    spawnAt: 100,
+    hp: 900,
+    radius: 2.1,
+    speed: 1.3,
+    stopZ: 0,
+    attackInterval: 8,
+    attackDamage: 16,
+    reward: 250,
+  },
+} as const;
+export interface Boss extends Point {
+  kind: BossKind;
+  hp: number;
+  maxHp: number;
+  parts: { id: number; hp: number; maxHp: number }[];
+  attackRemaining: number;
+  deadTime: number;
+  hitTime: number;
+}
+export const BOSS_PART_RADIUS = 0.55;
+export function bossPartPosition(boss: Boss, id: number): Point & { y: number; bossPart: number } {
+  const side = id - 1;
+  return {
+    x: boss.x + side * 1.75,
+    z: boss.z + (side === 0 ? -0.15 : 0.5),
+    y: side === 0 ? 2.85 : 2.3,
+    bossPart: id,
+  };
+}
 
 export interface Zombie extends Point {
   id: number;
@@ -123,11 +180,16 @@ export interface GameState {
   phase: Phase;
   player: Point;
   hp: number;
+  maxHp: number;
+  invulnerable: number;
+  progress: Progress;
+  earnedCoins: number;
   kills: number;
   elapsed: number;
   shots: number;
   hits: number;
   zombies: Zombie[];
+  boss: Boss | null;
   level: number; // 1-based, from 1 through LEVELS.length
   spawned: number;
   weapon: WeaponId;
@@ -141,9 +203,14 @@ export type GameEvent =
   | { type: 'loaded'; weapon: WeaponId }
   | { type: 'hurt'; hp: number }
   | { type: 'over' }
+  | { type: 'coins'; amount: number; at?: Point }
+  | { type: 'bossBreak'; at: Point; part: number }
+  | { type: 'bossWarning' }
+  | { type: 'revive' }
+  | { type: 'heal' }
   | { type: 'clear'; level: number; final: boolean };
 export interface GameInput {
-  aim: Point;
+  aim: Point & { bossPart?: number };
   firing: boolean;
 }
 export const RULES = {

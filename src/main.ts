@@ -3,7 +3,16 @@ import { GameAudio } from './game/audio';
 import { Simulation } from './game/simulation';
 import { World } from './game/world';
 import {
+  createProgress,
+  getPrice,
+  getReloadMultiplier,
+  loadProgress,
+  saveProgress,
+  type ShopItemId,
+} from './game/economy';
+import {
   LEVELS,
+  BOSSES,
   WEAPONS,
   WEAPON_IDS,
   RULES,
@@ -31,6 +40,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     </a>
     <div class="mission-tag"><span class="live-dot"></span> 隔离区防卫行动 <span class="slash">/</span> 五关战役</div>
     <div class="toolbar">
+      <span class="wallet" aria-label="金币余额">◈ <strong id="coins">0</strong></span>
+      <button class="shop-button" id="open-shop">补给站</button>
       <button class="icon-button" id="sound" aria-label="关闭声音" aria-pressed="false" title="声音">${icon('sound')}</button>
       <button class="icon-button" id="pause" aria-label="暂停游戏" title="暂停 · Esc" disabled>${icon('pause')}</button>
     </div>
@@ -44,11 +55,23 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 
     <div class="hud" id="hud" hidden>
       <div class="health-block">
-        <div class="hud-label">${icon('shield')} 生命值 <strong><span id="hp">100</span><span class="dim"> / 100</span></strong></div>
+        <div class="hud-label">${icon('shield')} 生命值 <strong><span id="hp">100</span><span class="dim"> / <span id="max-hp">100</span></span></strong></div>
         <div class="health-track" role="progressbar" aria-label="生命值" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100"><i id="health-fill"></i></div>
+        <div class="armor-line"><span>护甲 <b id="armor">0</b></span><span id="revive-status">无复活储备</span></div>
       </div>
       <div class="hud-metrics"><div><span>本关击杀</span><strong id="kills">00</strong></div><div><span>本关用时</span><strong id="time">00:00</strong></div></div>
     </div>
+    <div class="boss-hud" id="boss-hud" hidden>
+      <div><span id="boss-name"></span><strong id="boss-hp"></strong></div>
+      <div class="boss-track"><i id="boss-fill"></i></div>
+      <p id="boss-tip"></p><div id="boss-parts" class="boss-parts"></div>
+      <small id="boss-warning"></small>
+    </div>
+    <div class="battle-supplies" id="battle-supplies" hidden>
+      <span id="earned-coins">本关 +0 金币</span>
+      <button id="use-medkit" class="supply-button">血包 <b id="medkit-count">0</b><kbd>H</kbd></button>
+    </div>
+    <div class="reward-toast" id="reward-toast" role="status" aria-live="polite" hidden></div>
     <div class="level-progress" id="level-progress" hidden>
       <div><span id="level-hint"></span><strong id="remaining"></strong></div>
       <div class="level-track"><i id="level-fill"></i></div>
@@ -58,13 +81,13 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     <section class="intro" id="intro" aria-labelledby="intro-title">
       <div class="eyebrow"><span></span> HOLD YOUR GROUND</div>
       <h1 id="intro-title">最后<span>防线。</span></h1>
-      <p class="intro-copy">五道防线，三把武器。<br>选好目标，留好弹药，撑过最后一波。</p>
+      <p class="intro-copy">五道防线，两位异变首领。<br>击破弱点，收集金币，升级你的火力。</p>
       <div class="intro-rule"></div>
       <div class="control-row"><span class="mouse-icon"></span><span>移动鼠标<span class="control-note">瞄准目标</span></span></div>
       <div class="control-row"><span class="mouse-icon pressed"></span><span>按住左键<span class="control-note">持续开火</span></span></div>
       <div class="control-row keyboard-row"><span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> 切枪</span><span><kbd>R</kbd> 装填</span></div>
       <button class="primary-button" id="start">进入战斗 ${icon('arrow')}</button>
-      <div class="intro-meta"><span>四类敌人</span><i></i><span>每关 1–3 分钟</span><i></i><span>空仓自动装填</span></div>
+      <div class="intro-meta"><span>首领弱点</span><i></i><span>金币成长</span><i></i><span>本机保存</span></div>
     </section>
 
     <div class="reticle" id="reticle" hidden><i></i><i></i><i></i><i></i><b></b></div>
@@ -84,6 +107,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <p id="failure-copy">调整武器，再守住这道防线。</p>
         <div class="result-grid"><div><span>击杀僵尸</span><strong id="result-kills">0</strong></div><div><span>生存时间</span><strong id="result-time">00:00</strong></div><div><span>命中率</span><strong id="result-accuracy">0%</strong></div></div>
         <button class="primary-button" id="restart">重试本关 ${icon('arrow')}</button>
+        <button class="text-button" data-open-shop>前往补给站 · 调整装备</button>
         <div class="keyboard-hint">或按 <kbd>R</kbd> 重试 · 生命与弹匣补满</div>
       </section>
     </div>
@@ -93,9 +117,20 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <p id="clear-summary"></p>
         <div class="result-grid"><div><span>本关击杀</span><strong id="clear-kills">0</strong></div><div><span>本关用时</span><strong id="clear-time">00:00</strong></div><div><span>命中率</span><strong id="clear-accuracy">0%</strong></div></div>
         <p id="next-hint"></p>
+        <p class="settlement-reward" id="clear-reward"></p>
+        <button class="text-button" data-open-shop>前往补给站 · 升级与补给</button>
         <button class="primary-button" id="next-level">下一关 ${icon('arrow')}</button>
         <button class="primary-button" id="campaign-restart" hidden>重新出击 ${icon('arrow')}</button>
         <div class="keyboard-hint" id="supply-note">下一关补满生命与所有弹匣</div>
+      </section>
+    </div>
+    <div class="modal-wrap shop-wrap" id="shop-panel" hidden>
+      <section class="shop-modal" role="dialog" aria-modal="true" aria-labelledby="shop-title">
+        <div class="shop-heading"><div><div class="eyebrow">FIELD SUPPLY / 07</div><h2 id="shop-title">前线补给站</h2></div><button id="close-shop" class="shop-close" aria-label="关闭补给站">✕</button></div>
+        <div class="shop-balance"><span>可用金币 <strong id="shop-coins">0</strong></span><small id="save-status">资产自动保存在此浏览器 · 刷新后从第一关出击</small></div>
+        <div class="shop-grid" id="shop-grid"></div>
+        <p class="shop-message" id="shop-message" role="status">升级永久保留；道具使用后需要重新购买。</p>
+        <div class="shop-footer"><span>普通击杀 4–10 ◈ · 首领奖励 150 / 250 ◈<br>每关另有通关奖励，失败仍保留已获金币。</span><button class="shop-button" id="leave-shop">返回部署</button></div>
       </section>
     </div>
     <div class="modal-wrap" id="error-panel" hidden>
@@ -119,7 +154,76 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('game');
-const simulation = new Simulation();
+let storage: Storage | null = null;
+let loaded = { progress: createProgress(), available: false };
+try {
+  storage = window.localStorage;
+  loaded = loadProgress(storage);
+} catch {
+  // Storage can be disabled by browser privacy settings; the session remains playable.
+}
+const simulation = new Simulation(Math.random, loaded.progress);
+let storageAvailable = loaded.available;
+let lastSaved = JSON.stringify(loaded.progress);
+let shopOpen = false;
+let shopReturnFocus: HTMLElement | null = null;
+let rewardTime = 0;
+const shopItems: { id: ShopItemId; name: string; category: string; description: string }[] = [
+  {
+    id: 'rifle',
+    name: '突击步枪强化',
+    category: '01 / WEAPON',
+    description: '每级伤害 +20% · 30 发持续压制',
+  },
+  {
+    id: 'sniper',
+    name: '狙击步枪强化',
+    category: '02 / WEAPON',
+    description: '每级伤害 +20% · 克制重甲首领',
+  },
+  {
+    id: 'shotgun',
+    name: '霰弹枪强化',
+    category: '03 / WEAPON',
+    description: '每级伤害 +20% · 近距扇面群伤',
+  },
+  {
+    id: 'health',
+    name: '体能训练',
+    category: '04 / DEFENDER',
+    description: '每级生命上限 +25 · 出击时补满',
+  },
+  {
+    id: 'reload',
+    name: '装填训练',
+    category: '05 / DEFENDER',
+    description: '每级装填时间 −10% · 三把枪生效',
+  },
+  {
+    id: 'medkit',
+    name: '急救血包',
+    category: '06 / SUPPLY',
+    description: '回复 50 生命 · 按 H 使用 · 最多 3 个',
+  },
+  {
+    id: 'revive',
+    name: '复活甲',
+    category: '07 / SUPPLY',
+    description: '致命伤自动复活一次 · 满血并无敌 3 秒',
+  },
+  {
+    id: 'armor',
+    name: '防弹衣',
+    category: '08 / SUPPLY',
+    description: '护甲补至 60 · 受伤先消耗护甲',
+  },
+];
+$('shop-grid').innerHTML = shopItems
+  .map(
+    (item) =>
+      `<article class="shop-card"><small>${item.category}</small><div><h3>${item.name}</h3><span id="shop-level-${item.id}"></span></div><p>${item.description}</p><button id="buy-${item.id}" aria-label="购买${item.name}"><span id="shop-action-${item.id}">购买</span><strong id="shop-price-${item.id}"></strong></button></article>`,
+  )
+  .join('');
 const audio = new GameAudio();
 const input: GameInput = { aim: { x: 0, z: -5 }, firing: false };
 let world: World;
@@ -141,12 +245,101 @@ let frames = 0;
 let frameTime = 0;
 let fps = 0;
 
+function persist(): void {
+  const serialized = JSON.stringify(simulation.state.progress);
+  if (serialized === lastSaved) return;
+  storageAvailable = storage !== null && saveProgress(storage, simulation.state.progress);
+  if (storageAvailable) lastSaved = serialized;
+}
+
+function updateShop(): void {
+  const progress = simulation.state.progress;
+  $('shop-coins').textContent = String(progress.coins);
+  $('save-status').textContent = storageAvailable
+    ? '资产自动保存在此浏览器 · 刷新后从第一关出击'
+    : '浏览器存储不可用 · 本次仍可游玩，刷新将丢失资产';
+  for (const item of shopItems) {
+    const id = item.id;
+    const level =
+      id === 'health'
+        ? progress.healthLevel
+        : id === 'reload'
+          ? progress.reloadLevel
+          : WEAPON_IDS.includes(id as WeaponId)
+            ? progress.weapons[id as WeaponId]
+            : null;
+    const price = getPrice(progress, id);
+    $(`shop-level-${id}`).textContent =
+      level !== null
+        ? `Lv.${level} / 3`
+        : id === 'medkit'
+          ? `${progress.medkits} / 3`
+          : id === 'revive'
+            ? progress.revive
+              ? '已装备'
+              : '未装备'
+            : `${progress.armor} / 60`;
+    $(`shop-price-${id}`).textContent = price === null ? '—' : `${price} ◈`;
+    $(`shop-action-${id}`).textContent =
+      price === null
+        ? level !== null
+          ? '已满级'
+          : '已备齐'
+        : progress.coins < price
+          ? '金币不足'
+          : level !== null
+            ? '升级'
+            : '购买';
+    $<HTMLButtonElement>(`buy-${id}`).disabled = price === null || progress.coins < price;
+  }
+}
+
+function openShop(): void {
+  if (!['ready', 'over', 'cleared', 'victory'].includes(simulation.state.phase)) return;
+  clearInput();
+  shopReturnFocus = document.activeElement as HTMLElement;
+  shopOpen = true;
+  $('shop-panel').hidden = false;
+  for (const element of [
+    ...$('arena').children,
+    document.querySelector('.topbar')!,
+    document.querySelector('.bottom-bar')!,
+  ]) {
+    if (element.id !== 'shop-panel') (element as HTMLElement).inert = true;
+  }
+  updateShop();
+  $('close-shop').focus({ preventScroll: true });
+}
+
+function closeShop(): void {
+  shopOpen = false;
+  $('shop-panel').hidden = true;
+  for (const element of [
+    ...$('arena').children,
+    document.querySelector('.topbar')!,
+    document.querySelector('.bottom-bar')!,
+  ])
+    (element as HTMLElement).inert = false;
+  shopReturnFocus?.focus({ preventScroll: true });
+}
+
+function useMedkit(): void {
+  const events = simulation.useMedkit();
+  if (events.length === 0) return;
+  audio.unlock();
+  world.handleEvents(events);
+  audio.play(events);
+  persist();
+  updateUI();
+}
+
 function clearInput(): void {
   input.firing = false;
   $('reticle').hidden = true;
 }
 
 function begin(action: 'start' | 'retry' | 'nextLevel' = 'start'): void {
+  if (shopOpen) return;
   audio.unlock();
   clearInput();
   world.clearEffects();
@@ -197,7 +390,7 @@ function resume(): void {
 function aimAt(clientX: number, clientY: number): void {
   const point = world.screenToGround(clientX, clientY);
   if (!point) return;
-  input.aim = { x: point.x, z: Math.min(point.z, RULES.playerZ - 0.8) };
+  input.aim = { ...point, z: Math.min(point.z, RULES.playerZ - 0.8) };
   const bounds = canvas.getBoundingClientRect();
   const projected = world.project(input.aim);
   const reticle = $('reticle');
@@ -232,6 +425,25 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('keydown', (event) => {
   if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (shopOpen) {
+    if (event.code === 'Escape') closeShop();
+    if (event.code === 'Tab') {
+      const buttons = [
+        ...$('shop-panel').querySelectorAll<HTMLButtonElement>('button:not(:disabled)'),
+      ];
+      const first = buttons[0];
+      const last = buttons[buttons.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    return;
+  }
+  if (event.code === 'KeyH') useMedkit();
   if (event.code === 'Escape' || event.code === 'KeyP') {
     if (simulation.state.phase === 'playing') pause();
     else if (simulation.state.phase === 'paused') resume();
@@ -250,6 +462,22 @@ $('pause-restart').addEventListener('click', () => begin('retry'));
 $('next-level').addEventListener('click', () => begin('nextLevel'));
 $('campaign-restart').addEventListener('click', () => begin());
 $('reload').addEventListener('click', reload);
+$('use-medkit').addEventListener('click', useMedkit);
+$('open-shop').addEventListener('click', openShop);
+document
+  .querySelectorAll('[data-open-shop]')
+  .forEach((button) => button.addEventListener('click', openShop));
+$('close-shop').addEventListener('click', closeShop);
+$('leave-shop').addEventListener('click', closeShop);
+for (const item of shopItems) {
+  $(`buy-${item.id}`).addEventListener('click', () => {
+    if (!shopOpen || !simulation.purchase(item.id)) return;
+    $('shop-message').textContent = `${item.name}已购入。升级与装备将在出击时生效。`;
+    persist();
+    updateShop();
+    updateUI();
+  });
+}
 for (const weapon of WEAPON_IDS) {
   $(`weapon-${weapon}`).addEventListener('click', () => selectWeapon(weapon));
 }
@@ -280,6 +508,48 @@ function updateUI(): void {
   const total = levelTotal(level);
   const weapon = WEAPONS[state.weapon];
   const cleared = phase === 'cleared' || phase === 'victory';
+  $('coins').textContent = String(state.progress.coins);
+  $('earned-coins').textContent = `本关 +${state.earnedCoins} 金币`;
+  $<HTMLButtonElement>('open-shop').disabled = !['ready', 'over', 'cleared', 'victory'].includes(
+    phase,
+  );
+  $('battle-supplies').hidden = phase === 'ready' || cleared || phase === 'over';
+  $('medkit-count').textContent = String(state.progress.medkits);
+  $<HTMLButtonElement>('use-medkit').disabled =
+    phase !== 'playing' || state.hp >= state.maxHp || state.progress.medkits === 0;
+  $('armor').textContent = String(state.progress.armor);
+  $('revive-status').textContent =
+    state.invulnerable > 0
+      ? `无敌 ${state.invulnerable.toFixed(1)}s`
+      : state.progress.revive
+        ? '复活甲 ×1'
+        : '无复活储备';
+  const boss = state.boss;
+  document.body.dataset.boss = boss && boss.hp > 0 ? 'active' : 'none';
+  $('boss-hud').hidden = !boss || boss.hp <= 0 || phase === 'over' || cleared;
+  if (boss && boss.hp > 0) {
+    const aliveParts = boss.parts.filter((part) => part.hp > 0);
+    $('boss-name').textContent = `BOSS / ${BOSSES[boss.kind].name}`;
+    $('boss-hp').textContent = `${Math.ceil(boss.hp)} / ${boss.maxHp}`;
+    $('boss-fill').style.width = `${(boss.hp / boss.maxHp) * 100}%`;
+    $('boss-tip').textContent =
+      boss.kind === 'bulwark'
+        ? '装甲抵抗常规伤害 · 狙击伤害 ×1.5'
+        : aliveParts.length > 0
+          ? '核心受保护 · 瞄准发光瘤，逐个击破'
+          : '核心已暴露 · 集中火力！';
+    $('boss-parts').innerHTML = boss.parts
+      .map(
+        (part) =>
+          `<span class="${part.hp <= 0 ? 'broken' : ''}">弱点 ${part.id + 1} · ${part.hp <= 0 ? '已破坏' : Math.ceil(part.hp)}<i style="width:${(part.hp / part.maxHp) * 100}%"></i></span>`,
+      )
+      .join('');
+    $('boss-warning').textContent =
+      boss.attackRemaining <= 2
+        ? `⚠ 首领攻击预警 · ${Math.max(0, boss.attackRemaining).toFixed(1)}s`
+        : '备好血包与护甲，应对首领攻击';
+    $('boss-hud').classList.toggle('warning', boss.attackRemaining <= 2);
+  }
   document.body.dataset.phase = phase;
   $('intro').hidden = phase !== 'ready';
   $('hud').hidden = phase === 'ready';
@@ -311,14 +581,15 @@ function updateUI(): void {
   $('enemy-intel').textContent = [
     '游荡者 · 普通目标',
     '疾行者 · 血少速度快',
-    '重装者 · 厚血行动慢',
+    '重甲巨兽 · 狙击克制',
     '潜行者 · 身小难瞄准',
-    '混合来袭 · 切枪应对',
+    '孵化主宰 · 逐个击破弱点',
   ][state.level - 1];
   for (const id of WEAPON_IDS) {
     $<HTMLButtonElement>(`weapon-${id}`).disabled = phase !== 'playing';
     $(`weapon-${id}`).setAttribute('aria-pressed', String(state.weapon === id));
-    $(`mag-${id}`).textContent = `${state.ammo[id]} / ${WEAPONS[id].magazine}`;
+    $(`mag-${id}`).textContent =
+      `${state.ammo[id]} / ${WEAPONS[id].magazine} · Lv.${state.progress.weapons[id]}`;
   }
   $('ammo-count').textContent = String(state.ammo[state.weapon]);
   $('ammo-count').classList.toggle('empty', state.ammo[state.weapon] === 0);
@@ -330,21 +601,28 @@ function updateUI(): void {
     state.reloadRemaining > 0 ||
     state.ammo[state.weapon] === weapon.magazine;
   const reloadProgress =
-    state.reloadRemaining > 0 ? (1 - state.reloadRemaining / weapon.reloadTime) * 100 : 0;
+    state.reloadRemaining > 0
+      ? (1 - state.reloadRemaining / (weapon.reloadTime * getReloadMultiplier(state.progress))) *
+        100
+      : 0;
   $('reload-fill').style.width = `${reloadProgress}%`;
   document
     .querySelector('[aria-label="装填进度"]')!
     .setAttribute('aria-valuenow', String(Math.round(reloadProgress)));
   $('hp').textContent = String(state.hp);
-  $('health-fill').style.width = `${state.hp}%`;
+  $('max-hp').textContent = String(state.maxHp);
+  $('health-fill').style.width = `${(state.hp / state.maxHp) * 100}%`;
   $('health-fill').classList.toggle('critical', state.hp <= 30);
   document.querySelector('[role="progressbar"]')!.setAttribute('aria-valuenow', String(state.hp));
+  document
+    .querySelector('[aria-label="生命值"]')!
+    .setAttribute('aria-valuemax', String(state.maxHp));
   $('kills').textContent = state.kills.toString().padStart(2, '0');
   $('time').textContent = formatTime(state.elapsed);
   $('enemies').textContent = String(state.zombies.filter((zombie) => zombie.hp > 0).length);
   if (phase === 'over') {
     $('failure-copy').textContent =
-      `第 ${state.level} 关 · ${level.name}。调整武器，再守住这道防线。`;
+      `第 ${state.level} 关 · ${level.name}。已保留本关获得的 ${state.earnedCoins} 金币，可以先补给再挑战。`;
     $('result-kills').textContent = String(state.kills);
     $('result-time').textContent = formatTime(state.elapsed);
     $('result-accuracy').textContent =
@@ -364,6 +642,8 @@ function updateUI(): void {
     $('clear-time').textContent = formatTime(state.elapsed);
     $('clear-accuracy').textContent =
       `${state.shots ? Math.round((state.hits / state.shots) * 100) : 0}%`;
+    $('clear-reward').textContent =
+      `本关共获得 ${state.earnedCoins} ◈${boss?.hp === 0 ? ' · 首领奖励已入账' : ''}`;
     $('next-hint').textContent =
       phase === 'victory'
         ? '试试不同武器组合，重新挑战五关战役。'
@@ -394,6 +674,21 @@ function frame(now: number): void {
   const events = simulation.step(dt, input);
   world.handleEvents(events);
   audio.play(events);
+  if (events.length > 0) persist();
+  const reward = events.reduce(
+    (sum, event) => sum + (event.type === 'coins' ? event.amount : 0),
+    0,
+  );
+  if (reward > 0) {
+    $('reward-toast').textContent = `+${reward} ◈ 金币已拾取`;
+    rewardTime = 1.5;
+  }
+  if (events.some((event) => event.type === 'revive')) {
+    $('reward-toast').textContent = '复活甲已消耗 · 满血复活 · 无敌 3 秒';
+    rewardTime = 3;
+  }
+  rewardTime = Math.max(0, rewardTime - dt);
+  $('reward-toast').hidden = rewardTime === 0;
   if (events.some((event) => event.type === 'hurt')) damageTime = 0.35;
   damageTime = Math.max(0, damageTime - dt);
   $('damage').style.opacity = String(damageTime / 0.35);
@@ -422,7 +717,8 @@ if (import.meta.env.DEV && new URLSearchParams(location.search).has('inspect')) 
     __game: {
       snapshot: () =>
         structuredClone({ ...simulation.state, fps, render: world.info, firing: input.firing }),
-      project: (point: { x: number; z: number }) => world.project(point),
+      project: (point: { x: number; z: number; y?: number }) => world.project(point),
+      bossPartPositions: () => world.bossPartPositions(),
     },
   });
 }
