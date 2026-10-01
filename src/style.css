@@ -1073,6 +1073,7 @@ kbd {
 }
 .battle-supplies {
   position: absolute;
+  z-index: 4;
   bottom: 57px;
   right: 27px;
   display: flex;
@@ -1093,6 +1094,18 @@ kbd {
 }
 .supply-button b {
   margin: 0 5px;
+}
+.auto-button[aria-pressed='true'] {
+  border-color: #d5ee91;
+  color: #e2f5af;
+  background: #38472a;
+}
+.horde-warning {
+  color: #ffb479 !important;
+  font-weight: 700;
+}
+.weapon-card.depleted {
+  opacity: 0.5;
 }
 .reward-toast {
   position: absolute;
@@ -1261,6 +1274,9 @@ kbd {
   .battle-supplies {
     bottom: 110px;
   }
+  .battle-supplies > span {
+    display: none;
+  }
   .weapon-card > b {
     font-size: 10px;
   }
@@ -1321,17 +1337,24 @@ kbd {
     top: auto;
     bottom: 160px;
   }
+  body[data-phase='ready'] .battle-supplies {
+    top: 50px;
+    bottom: auto;
+  }
   .battle-supplies {
     right: 17px;
     bottom: 111px;
-    gap: 10px;
+    gap: 6px;
   }
   .battle-supplies > span {
     font-size: 9px;
   }
   .supply-button {
-    padding: 9px 10px;
+    padding: 10px 8px;
     font-size: 10px;
+  }
+  .supply-button kbd {
+    display: none;
   }
   .reward-toast {
     top: 43px;
@@ -1525,5 +1548,56 @@ kbd {
   }
   .coordinates {
     max-width: 75%;
+  }
+}
+
+@media (max-width: 700px) and (max-height: 740px) {
+  .battle-supplies {
+    flex-direction: column;
+    align-items: stretch;
+    width: 84px;
+  }
+  .battle-supplies .supply-button {
+    padding: 10px 6px;
+    white-space: nowrap;
+  }
+  .boss-hud {
+    top: 8px;
+    padding: 6px 8px;
+  }
+  .boss-hud p {
+    display: none;
+  }
+  .boss-track {
+    margin-top: 5px;
+  }
+  .boss-parts {
+    margin: 5px 0;
+  }
+  .boss-parts span {
+    padding: 3px 2px 5px;
+  }
+  body[data-boss='active'] .hud {
+    top: 105px;
+  }
+  body[data-boss='active'] .health-block {
+    width: 100px;
+    padding: 6px;
+  }
+  body[data-boss='active'] .hud-label,
+  body[data-boss='active'] .hud-label strong {
+    font-size: 8px;
+    gap: 4px;
+  }
+  body[data-boss='active'] .hud-label svg {
+    width: 10px;
+    height: 10px;
+  }
+  body[data-boss='active'] .armor-line {
+    flex-direction: column;
+    gap: 3px;
+  }
+  body[data-boss='active'] .hud-metrics {
+    display: none;
   }
 }

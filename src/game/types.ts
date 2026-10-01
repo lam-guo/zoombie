@@ -15,53 +15,86 @@ export const WEAPONS = {
     code: 'AR-01',
     description: '稳定连射 · 单体压制',
     magazine: 30,
+    reloadType: 'magazine',
     damage: 25,
     fireInterval: 0.2,
     reloadTime: 1.8,
     range: 40,
-    penetration: 1,
     halfAngle: 0,
     color: '#deed95',
   },
   sniper: {
     name: '狙击步枪',
     code: 'SR-02',
-    description: '穿透三体 · 远距重击',
+    description: '余伤穿透 · 逐发装填',
     magazine: 5,
-    damage: 180,
+    reloadType: 'round',
+    damage: 260,
     fireInterval: 1.15,
-    reloadTime: 2.8,
+    reloadTime: 0.7,
     range: 40,
-    penetration: 3,
     halfAngle: 0,
     color: '#91d4e5',
   },
   shotgun: {
     name: '霰弹枪',
     code: 'SG-03',
-    description: '近距扇面 · 群体清除',
+    description: '近距重击 · 逐发装填',
     magazine: 6,
-    damage: 90,
+    reloadType: 'round',
+    damage: 140,
     fireInterval: 0.85,
-    reloadTime: 2.6,
+    reloadTime: 0.55,
     range: 9,
-    penetration: 0,
     halfAngle: Math.PI / 10,
     color: '#efb279',
   },
 } as const;
 export const WEAPON_IDS: WeaponId[] = ['rifle', 'sniper', 'shotgun'];
 export const ZOMBIES = {
-  normal: { name: '游荡者', hp: 75, speed: 1.1, radius: 0.48, scale: 1, color: '#91a37b' },
-  tank: { name: '重装者', hp: 200, speed: 0.7, radius: 0.65, scale: 1.35, color: '#ad7966' },
-  runner: { name: '疾行者', hp: 40, speed: 1.8, radius: 0.4, scale: 0.9, color: '#cdab70' },
-  small: { name: '潜行者', hp: 50, speed: 1.2, radius: 0.27, scale: 0.65, color: '#7dc2b1' },
+  normal: {
+    name: '游荡者',
+    hp: 110,
+    stagger: 0.14,
+    speed: 1.1,
+    radius: 0.48,
+    scale: 1,
+    color: '#91a37b',
+  },
+  tank: {
+    name: '重装者',
+    hp: 330,
+    stagger: 0.045,
+    speed: 0.7,
+    radius: 0.65,
+    scale: 1.35,
+    color: '#ad7966',
+  },
+  runner: {
+    name: '疾行者',
+    hp: 70,
+    stagger: 0.28,
+    speed: 1.8,
+    radius: 0.4,
+    scale: 0.9,
+    color: '#cdab70',
+  },
+  small: {
+    name: '潜行者',
+    hp: 65,
+    stagger: 0.1,
+    speed: 1.2,
+    radius: 0.27,
+    scale: 0.65,
+    color: '#7dc2b1',
+  },
 } as const;
 export interface LevelDefinition {
   name: string;
   subtitle: string;
   duration: number;
   batchSize: number;
+  reserve: Record<WeaponId, number>;
   counts: Record<ZombieKind, number>;
   color: string;
 }
@@ -71,6 +104,7 @@ export const LEVELS: readonly LevelDefinition[] = [
     subtitle: '熟悉武器，守住检查站。',
     duration: 60,
     batchSize: 3,
+    reserve: { rifle: 60, sniper: 7, shotgun: 6 },
     counts: { normal: 30, runner: 0, tank: 0, small: 0 },
     color: '#a8c8b2',
   },
@@ -79,6 +113,7 @@ export const LEVELS: readonly LevelDefinition[] = [
     subtitle: '疾行者出现。优先处理快速目标。',
     duration: 85,
     batchSize: 4,
+    reserve: { rifle: 90, sniper: 13, shotgun: 12 },
     counts: { normal: 40, runner: 8, tank: 0, small: 0 },
     color: '#93becf',
   },
@@ -87,6 +122,7 @@ export const LEVELS: readonly LevelDefinition[] = [
     subtitle: '狙击重击能够克制重甲巨兽。',
     duration: 110,
     batchSize: 5,
+    reserve: { rifle: 180, sniper: 30, shotgun: 30 },
     counts: { normal: 42, runner: 16, tank: 10, small: 0 },
     color: '#cabc93',
   },
@@ -95,6 +131,7 @@ export const LEVELS: readonly LevelDefinition[] = [
     subtitle: '小型目标混入。近距霰弹可以解围。',
     duration: 135,
     batchSize: 6,
+    reserve: { rifle: 270, sniper: 39, shotgun: 44 },
     counts: { normal: 44, runner: 20, tank: 18, small: 10 },
     color: '#9eaed2',
   },
@@ -103,6 +140,7 @@ export const LEVELS: readonly LevelDefinition[] = [
     subtitle: '先击破孵化主宰的三个发光弱点。',
     duration: 160,
     batchSize: 7,
+    reserve: { rifle: 390, sniper: 59, shotgun: 64 },
     counts: { normal: 50, runner: 26, tank: 28, small: 16 },
     color: '#d6a091',
   },
@@ -175,6 +213,17 @@ export interface Zombie extends Point {
   hitTime: number;
   deadTime: number;
   variant: number;
+  staggerRemaining: number;
+  dodgeRemaining: number;
+  dodgeStreak: number;
+}
+export interface Grenade {
+  id: number;
+  from: Point;
+  to: Point & { bossPart?: number };
+  elapsed: number;
+  duration: number;
+  radius: number;
 }
 export interface GameState {
   phase: Phase;
@@ -195,9 +244,21 @@ export interface GameState {
   weapon: WeaponId;
   ammo: Record<WeaponId, number>;
   reloadRemaining: number;
+  reserve: Record<WeaponId, number>;
+  autoFire: boolean;
+  autoAim: GameInput['aim'] | null;
+  grenades: Grenade[];
+  hordeRemaining: number;
 }
 export type GameEvent =
-  | { type: 'shot'; weapon: WeaponId; from: Point; to: Point; hit: boolean }
+  | {
+      type: 'shot';
+      weapon: WeaponId;
+      from: Point;
+      to: Point;
+      hit: boolean;
+      traces?: { to: Point; hit: boolean }[];
+    }
   | { type: 'hit'; at: Point; killed: boolean }
   | { type: 'reload'; weapon: WeaponId }
   | { type: 'loaded'; weapon: WeaponId }
@@ -208,6 +269,10 @@ export type GameEvent =
   | { type: 'bossWarning' }
   | { type: 'revive' }
   | { type: 'heal' }
+  | { type: 'grenadeThrown'; from: Point; to: Point; duration: number; radius: number }
+  | { type: 'explosion'; at: Point; radius: number }
+  | { type: 'dodge'; at: Point }
+  | { type: 'horde'; duration: number }
   | { type: 'clear'; level: number; final: boolean };
 export interface GameInput {
   aim: Point & { bossPart?: number };
@@ -222,4 +287,10 @@ export const RULES = {
   attackDistance: 1.45,
   maxZombies: 30,
   corpseLifetime: 1.5,
+  grenadeDuration: 0.65,
+  grenadeRadius: 4.5,
+  grenadeRange: 22,
+  grenadeDamage: 420,
+  grenadeBossDamage: 90,
+  grenadePartDamage: 60,
 } as const;

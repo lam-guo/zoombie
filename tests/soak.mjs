@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { chromium } from '@playwright/test';
 import { createServer } from 'vite';
 import { readBattle, applyBattleInput, buySupplies } from './campaign.mjs';
 
 const duration = Number(process.env.SOAK_SECONDS ?? 300);
+const screenshotDirectory = process.env.SCREENSHOT_DIR;
 assert(Number.isFinite(duration) && duration > 0, 'SOAK_SECONDS must be positive');
 const errors = [];
 const samples = [];
@@ -23,6 +26,7 @@ let defeatedBosses = 0;
 let lastState;
 
 try {
+  if (screenshotDirectory) await mkdir(screenshotDirectory, { recursive: true });
   let url = process.env.BASE_URL;
   if (!url) {
     server = await createServer({ server: { host: '127.0.0.1', port: 0 }, logLevel: 'error' });
@@ -44,16 +48,48 @@ try {
   await page.waitForFunction(() => Boolean(window.__game));
   const definitions = await page.evaluate(async () => {
     const { LEVELS, WEAPONS, RULES, BOSSES, levelTotal } = await import('/src/game/types.ts');
-    return { totals: LEVELS.map(levelTotal), weapons: WEAPONS, rules: RULES, bosses: BOSSES };
+    return {
+      totals: LEVELS.map(levelTotal),
+      reserves: LEVELS.map((level) => level.reserve),
+      weapons: WEAPONS,
+      rules: RULES,
+      bosses: BOSSES,
+    };
   });
   await page.getByRole('button', { name: '进入战斗' }).click();
   const started = Date.now();
   let nextSample = started;
   const control = { holding: false };
+  const savedWeapons = new Set();
+  let savedExplosion = false;
 
   while (Date.now() - started < duration * 1_000) {
-    const battle = await readBattle(page);
-    const { state } = battle;
+    let battle = await readBattle(page);
+    let { state } = battle;
+    if (
+      screenshotDirectory &&
+      !savedWeapons.has(state.weapon) &&
+      state.shots > (lastState?.shots ?? state.shots)
+    ) {
+      await page.screenshot({
+        path: join(screenshotDirectory, `zoombie-soak-${state.weapon}.png`),
+      });
+      savedWeapons.add(state.weapon);
+    }
+    if (
+      screenshotDirectory &&
+      !savedExplosion &&
+      lastState?.grenades.length &&
+      state.grenades.length === 0
+    ) {
+      await page.mouse.up();
+      control.holding = false;
+      await page.waitForTimeout(250);
+      await page.screenshot({ path: join(screenshotDirectory, 'zoombie-soak-explosion.png') });
+      savedExplosion = true;
+      battle = await readBattle(page);
+      state = battle.state;
+    }
     lastState = state;
     if (state.boss?.hp > 0) encounteredBosses.add(state.boss.kind);
     highestLevel = Math.max(highestLevel, state.level);
@@ -66,6 +102,8 @@ try {
         coins: state.progress.coins,
         fps: state.fps,
         ammo: state.ammo[state.weapon],
+        reserve: state.reserve[state.weapon],
+        grenades: state.progress.grenades,
         reloadRemaining: state.reloadRemaining,
         errors: errors.length,
         live: state.zombies.filter((zombie) => zombie.hp > 0).length,
@@ -79,12 +117,14 @@ try {
         sample.live <= definitions.rules.maxZombies,
         `Live zombie limit exceeded: ${sample.live}`,
       );
-      // A shotgun can clear all 30 live targets twice within the 1.5 second corpse lifetime.
       assert(
-        sample.corpses <= definitions.rules.maxZombies * 2,
-        `Corpses are not being recycled: ${sample.corpses}`,
+        sample.corpses <= definitions.totals[state.level - 1] &&
+          state.zombies.every(
+            (zombie) => zombie.hp > 0 || zombie.deadTime < definitions.rules.corpseLifetime + 1e-8,
+          ),
+        `Corpses exceeded the quota or survived their lifetime: ${sample.corpses}`,
       );
-      assert(sample.effects <= 77, `Effect pool capacity exceeded: ${sample.effects}`);
+      assert(sample.effects <= 93, `Effect pool capacity exceeded: ${sample.effects}`);
       assert(state.hp >= 0 && state.hp <= state.maxHp, `Invalid health: ${state.hp}`);
       assert(
         Number.isSafeInteger(state.progress.coins) &&
@@ -104,7 +144,39 @@ try {
           Number.isInteger(ammo) && ammo >= 0 && ammo <= definitions.weapons[weapon].magazine,
           `Invalid ${weapon} magazine: ${ammo}`,
         );
+        assert(
+          Number.isSafeInteger(state.reserve[weapon]) &&
+            state.reserve[weapon] >= 0 &&
+            state.reserve[weapon] <= definitions.reserves[state.level - 1][weapon],
+          `Invalid ${weapon} reserve`,
+        );
       }
+      assert.equal(
+        Object.entries(definitions.weapons).reduce(
+          (sum, [weapon, spec]) =>
+            sum +
+            spec.magazine +
+            definitions.reserves[state.level - 1][weapon] -
+            state.ammo[weapon] -
+            state.reserve[weapon],
+          0,
+        ),
+        state.shots,
+        'Fired rounds must match ammunition consumed',
+      );
+      assert(
+        Number.isInteger(state.progress.grenades) &&
+          state.progress.grenades >= 0 &&
+          state.progress.grenades <= 3,
+        'Invalid grenade inventory',
+      );
+      assert(
+        state.grenades.length <= 1 &&
+          state.grenades.every(
+            (grenade) => grenade.elapsed >= 0 && grenade.elapsed <= grenade.duration,
+          ),
+        'Invalid grenade flight',
+      );
       assert(
         state.zombies.every((zombie) => Number.isFinite(zombie.x) && Number.isFinite(zombie.z)),
         'Zombie position is not finite',
@@ -177,6 +249,9 @@ try {
     durationSeconds: (Date.now() - started) / 1_000,
     simulatedSeconds: finishedElapsed + lastState.elapsed,
     viewport: { width: 1280, height: 800 },
+    screenshots: screenshotDirectory
+      ? { directory: screenshotDirectory, weapons: [...savedWeapons], explosion: savedExplosion }
+      : null,
     sampleCount: samples.length,
     fps: { median: percentile(0.5), p5: percentile(0.05) },
     peak: {
@@ -191,6 +266,7 @@ try {
     victories,
     highestLevel,
     defeatedBosses,
+    grenadesThrown: control.grenadesThrown ?? 0,
     encounteredBosses: [...encounteredBosses],
     purchases,
     totalEarned: finishedEarned + lastState.earnedCoins,
@@ -206,6 +282,11 @@ try {
     summary.totalEarned - summary.totalSpent,
     lastState.progress.coins,
     'Coins must reconcile with earned rewards and purchases across levels and retries',
+  );
+  assert.equal(
+    purchases.filter((purchase) => purchase.item === 'grenade').length - summary.grenadesThrown,
+    lastState.progress.grenades,
+    'Grenade purchases and consumption must reconcile',
   );
   assert(summary.shots > 0 && summary.kills > 0, 'The soak run must exercise shooting and kills');
   if (duration >= 300)
