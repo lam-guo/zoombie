@@ -15,7 +15,15 @@ import type { WeaponId } from './types';
 
 const storageKey = 'last-line-progress-v1';
 const weaponIds: WeaponId[] = ['rifle', 'sniper', 'shotgun'];
-const items: ShopItemId[] = [...weaponIds, 'health', 'reload', 'medkit', 'revive', 'armor'];
+const items: ShopItemId[] = [
+  ...weaponIds,
+  'health',
+  'reload',
+  'medkit',
+  'grenade',
+  'revive',
+  'armor',
+];
 
 describe('progress and purchases', () => {
   it('starts with independent empty progress and baseline combat modifiers', () => {
@@ -26,6 +34,7 @@ describe('progress and purchases', () => {
       healthLevel: 0,
       reloadLevel: 0,
       medkits: 0,
+      grenades: 0,
       revive: false,
       armor: 0,
     });
@@ -125,6 +134,22 @@ describe('progress and purchases', () => {
     expect(progress.coins).toBe(0);
   });
 
+  it('sells individual grenades with no free refill and a carry limit of three', () => {
+    const progress = { ...createProgress(), coins: 240 };
+    for (let count = 1; count <= 3; count++) {
+      expect(getPrice(progress, 'grenade')).toBe(60);
+      expect(purchase(progress, 'grenade')).toBe(true);
+      expect(progress.grenades).toBe(count);
+      expect(progress.coins).toBe(240 - count * 60);
+    }
+    expect(purchase(progress, 'grenade')).toBe(false);
+    expect(progress.coins).toBe(60);
+    progress.grenades--;
+    expect(purchase(progress, 'grenade')).toBe(true);
+    expect(progress.grenades).toBe(3);
+    expect(progress.coins).toBe(0);
+  });
+
   it('charges the fixed armor price to replenish durability to sixty', () => {
     const progress = createProgress();
     progress.coins = 200;
@@ -172,6 +197,7 @@ describe('versioned storage', () => {
       healthLevel: 3,
       reloadLevel: 3,
       medkits: 3,
+      grenades: 2,
       revive: true,
       armor: 60,
     };
@@ -179,7 +205,7 @@ describe('versioned storage', () => {
     expect(saveProgress({ setItem }, progress)).toBe(true);
     expect(setItem).toHaveBeenCalledExactlyOnceWith(
       storageKey,
-      JSON.stringify({ version: 1, progress }),
+      JSON.stringify({ version: 2, progress }),
     );
     const restored = loadProgress({ getItem: () => setItem.mock.calls[0][1] });
     expect(restored).toEqual({ progress, available: true });
@@ -194,7 +220,7 @@ describe('versioned storage', () => {
     '42',
     '"text"',
     JSON.stringify(createProgress()),
-    JSON.stringify({ version: 2, progress: createProgress() }),
+    JSON.stringify({ version: 3, progress: createProgress() }),
     JSON.stringify({ version: '1', progress: createProgress() }),
     JSON.stringify({ progress: createProgress() }),
     JSON.stringify({ version: 1 }),
@@ -222,12 +248,16 @@ describe('versioned storage', () => {
     ['excess health level', { ...valid, healthLevel: 4 }],
     ['excess reload level', { ...valid, reloadLevel: 4 }],
     ['excess medkits', { ...valid, medkits: 4 }],
+    ['missing grenades', { ...valid, grenades: undefined }],
+    ['excess grenades', { ...valid, grenades: 4 }],
+    ['negative grenades', { ...valid, grenades: -1 }],
+    ['fractional grenades', { ...valid, grenades: 0.5 }],
     ['non-boolean revive', { ...valid, revive: 1 }],
     ['excess armor', { ...valid, armor: 61 }],
     ['fractional armor', { ...valid, armor: 0.5 }],
     ['extra field', { ...valid, extra: 1 }],
   ])('rejects the entire save for %s', (_, progress) => {
-    const saved = JSON.stringify({ version: 1, progress });
+    const saved = JSON.stringify({ version: 2, progress });
     expect(loadProgress({ getItem: () => saved })).toEqual({
       progress: createProgress(),
       available: true,
@@ -248,6 +278,35 @@ describe('versioned storage', () => {
       progress: createProgress(),
       available: false,
     });
+  });
+
+  it('migrates valid v1 assets without granting grenades or losing purchases', () => {
+    const { grenades: _, ...legacy } = {
+      ...createProgress(),
+      coins: 347,
+      weapons: { rifle: 2, sniper: 1, shotgun: 3 },
+      healthLevel: 2,
+      reloadLevel: 1,
+      armor: 17,
+      medkits: 2,
+      revive: true,
+    };
+    const restored = loadProgress({
+      getItem: () => JSON.stringify({ version: 1, progress: legacy }),
+    });
+    expect(restored.progress).toEqual({ ...legacy, grenades: 0 });
+    const setItem = vi.fn();
+    expect(saveProgress({ setItem }, restored.progress)).toBe(true);
+    expect(JSON.parse(setItem.mock.calls[0][1]).version).toBe(2);
+  });
+
+  it('rejects invalid v1 assets and a v1 envelope carrying new inventory', () => {
+    const { grenades: _, ...legacy } = createProgress();
+    for (const progress of [{ ...legacy, coins: -1 }, { ...legacy, extra: 1 }, createProgress()]) {
+      expect(
+        loadProgress({ getItem: () => JSON.stringify({ version: 1, progress }) }).progress,
+      ).toEqual(createProgress());
+    }
   });
 
   it('reports a failed write without changing in-memory progress', () => {

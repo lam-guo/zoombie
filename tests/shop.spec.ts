@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { createProgress, type Progress } from '../src/game/economy';
-import type { GameState } from '../src/game/types';
+import { LEVELS, type GameState } from '../src/game/types';
 
 const snapshot = (page: Page) => page.evaluate(() => window.__game.snapshot());
 const errors = new WeakMap<Page, string[]>();
@@ -24,7 +24,7 @@ async function open(page: Page, progress?: Progress) {
       if (!sessionStorage.getItem('fixture-loaded')) {
         localStorage.setItem(
           'last-line-progress-v1',
-          JSON.stringify({ version: 1, progress: saved }),
+          JSON.stringify({ version: 2, progress: saved }),
         );
         sessionStorage.setItem('fixture-loaded', 'true');
       }
@@ -83,6 +83,7 @@ test('purchases deduct coins, persist across reload, and apply upgrades on deplo
     healthLevel: 1,
     reloadLevel: 1,
     medkits: 1,
+    grenades: 0,
     revive: true,
     armor: 60,
   });
@@ -157,6 +158,69 @@ test('blocked storage keeps game playable and explains session-only progress', a
   await page.locator('#close-shop').click();
   await page.locator('#start').click();
   expect((await snapshot(page)).phase).toBe('playing');
+});
+
+test('earned coins buy grenades whose use persists through pause, defeat, retry, and reload', async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  await open(page);
+  await page.locator('#start').click();
+  await page.locator('#auto-fire').click();
+  const cleared = await advanceUntil(
+    page,
+    (state) => state.phase === 'cleared',
+    LEVELS[0].duration + 60,
+  );
+  expect(cleared.progress.grenades).toBe(0);
+  expect(cleared.progress.coins).toBeGreaterThanOrEqual(120);
+  await page.locator('#open-shop').click();
+  await page.locator('#buy-grenade').click();
+  await page.locator('#buy-grenade').click();
+  const purchased = await snapshot(page);
+  expect(purchased.progress.grenades).toBe(2);
+  expect(purchased.progress.coins).toBe(cleared.progress.coins - 120);
+  await page.locator('#close-shop').click();
+  await page.locator('#next-level').click();
+  await page.locator('#auto-fire').click();
+  await page.clock.fastForward(250);
+  const target = await page.evaluate(() => {
+    const state = window.__game.snapshot();
+    const nearest = state.zombies
+      .filter((zombie) => zombie.hp > 0)
+      .sort(
+        (a, b) =>
+          Math.hypot(a.x - state.player.x, a.z - state.player.z) -
+          Math.hypot(b.x - state.player.x, b.z - state.player.z),
+      )[0];
+    return window.__game.project(nearest);
+  });
+  await page.mouse.move(target.x, target.y);
+  await page.keyboard.press('g');
+  const thrown = await snapshot(page);
+  expect(thrown.progress.grenades).toBe(1);
+  expect(thrown.grenades).toHaveLength(1);
+  await page.keyboard.press('g');
+  expect((await snapshot(page)).progress.grenades).toBe(1);
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('g');
+  await page.clock.fastForward(5_000);
+  const paused = await snapshot(page);
+  expect(paused.grenades).toEqual(thrown.grenades);
+  expect(paused.progress.grenades).toBe(1);
+  await page.keyboard.press('Escape');
+  const exploded = await advanceUntil(page, (state) => state.grenades.length === 0, 2);
+  expect(exploded.kills).toBeGreaterThan(thrown.kills);
+  expect(exploded.shots).toBe(0);
+  const ended = await advanceUntil(page, (state) => state.phase === 'over', 60);
+  expect(ended.progress.grenades).toBe(1);
+  await page.locator('#restart').click();
+  const retried = await snapshot(page);
+  expect(retried.progress).toEqual(ended.progress);
+  expect(retried.grenades).toHaveLength(0);
+  expect(retried.reserve).toEqual(LEVELS[1].reserve);
+  await page.reload();
+  expect((await snapshot(page)).progress).toEqual(ended.progress);
 });
 
 test.describe('mobile shop', () => {

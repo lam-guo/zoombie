@@ -49,6 +49,9 @@ function target(id: number, x = 0, z = 0, kind: ZombieKind = 'normal'): Zombie {
     hitTime: 0,
     deadTime: -1,
     variant: 0,
+    staggerRemaining: 0,
+    dodgeRemaining: 0,
+    dodgeStreak: 0,
   };
 }
 
@@ -70,14 +73,16 @@ describe('weapons and combat', () => {
     ).toBe(true);
   });
 
-  it('fires immediately at five shots a second and kills a normal enemy on the third hit', () => {
+  it('fires immediately at five shots a second and kills a tougher normal enemy on the fifth hit', () => {
     const simulation = setup();
     const zombie = target(1);
     simulation.state.zombies.push(zombie);
     expect(simulation.step(0.2, firing).filter((event) => event.type === 'shot')).toHaveLength(1);
-    expect(zombie.hp).toBe(50);
+    expect(zombie.hp).toBe(85);
     simulation.step(0.2, firing);
-    expect(zombie.hp).toBe(25);
+    expect(zombie.hp).toBe(60);
+    simulation.step(0.4, firing);
+    expect(zombie.hp).toBe(10);
     expect(simulation.step(0.2, firing)).toContainEqual({
       type: 'hit',
       at: { x: 0, z: 0 },
@@ -85,10 +90,10 @@ describe('weapons and combat', () => {
     });
     expect(zombie.hp).toBe(0);
     simulation.step(0.4, firing);
-    expect(simulation.state.shots).toBe(5);
-    expect(simulation.state.hits).toBe(3);
+    expect(simulation.state.shots).toBe(7);
+    expect(simulation.state.hits).toBe(5);
     expect(simulation.state.kills).toBe(1);
-    expect(simulation.state.ammo.rifle).toBe(25);
+    expect(simulation.state.ammo.rifle).toBe(23);
   });
 
   it('rifle hits the nearest living circle only, then shoots through its corpse', () => {
@@ -99,14 +104,14 @@ describe('weapons and combat', () => {
     simulation.state.zombies.push(far, near);
     const shot = simulation.step(0.2, firing).find((event) => event.type === 'shot');
     expect(near.hp).toBe(0);
-    expect(far.hp).toBe(75);
+    expect(far.hp).toBe(110);
     expect(shot?.type === 'shot' && shot.to.z).toBeCloseTo(3.48);
     simulation.step(0.2, firing);
-    expect(far.hp).toBe(50);
+    expect(far.hp).toBe(85);
     expect(simulation.state.kills).toBe(1);
   });
 
-  it('sniper penetrates exactly three living targets in distance order and counts one accurate shot', () => {
+  it('sniper stops at a surviving tank and spends only its remaining health on the next shot', () => {
     const simulation = setup();
     simulation.selectWeapon('sniper');
     const near = target(1, 0, 4, 'tank');
@@ -116,16 +121,18 @@ describe('weapons and combat', () => {
     const offAxis = target(5, 1.5, 1);
     simulation.state.zombies.push(fourth, third, offAxis, middle, near);
     const events = simulation.step(0.01, firing);
-    expect([near.hp, middle.hp, third.hp, fourth.hp, offAxis.hp]).toEqual([20, 0, 0, 75, 75]);
-    expect(events.filter((event) => event.type === 'hit')).toHaveLength(3);
+    expect([near.hp, middle.hp, third.hp, fourth.hp, offAxis.hp]).toEqual([70, 110, 110, 110, 110]);
+    expect(events.filter((event) => event.type === 'hit')).toHaveLength(1);
     const shot = events.find((event) => event.type === 'shot');
-    expect(shot?.type === 'shot' && shot.to.z).toBeCloseTo(0.48);
+    expect(shot?.type === 'shot' && shot.to.z).toBeCloseTo(4.65);
     expect(simulation.state.shots).toBe(1);
     expect(simulation.state.hits).toBe(1);
     expect(simulation.state.ammo.sniper).toBe(4);
     simulation.step(1.17, firing);
     expect(near.hp).toBe(0);
-    expect(fourth.hp).toBe(0);
+    expect(middle.hp).toBe(0);
+    expect(third.hp).toBe(30);
+    expect(fourth.hp).toBe(110);
     expect(simulation.state.hits).toBe(2);
   });
 
@@ -135,13 +142,13 @@ describe('weapons and combat', () => {
     const near = target(1, 0, 4);
     const inside = target(2, 1.2, 2);
     const edge = target(3, 0, -2);
-    const outside = target(4, 2, 2);
-    const tooFar = target(5, 0, -2.01);
+    const outside = target(4, 2.5, 2);
+    const tooFar = target(5, 0, -2.6);
     const behind = target(6, 0, 10);
     simulation.state.zombies.push(near, inside, edge, outside, tooFar, behind);
     const events = simulation.step(0.01, firing);
     expect([near.hp, inside.hp, edge.hp]).toEqual([0, 0, 0]);
-    expect([outside.hp, tooFar.hp, behind.hp]).toEqual([75, 75, 75]);
+    expect([outside.hp, tooFar.hp, behind.hp]).toEqual([110, 110, 110]);
     expect(events.filter((event) => event.type === 'hit')).toHaveLength(3);
     expect(simulation.state.kills).toBe(3);
     expect(simulation.state.hits).toBe(1);
@@ -156,9 +163,9 @@ describe('weapons and combat', () => {
     const outOfRange = target(3, 0, -34);
     simulation.state.zombies.push(small, normal, outOfRange);
     simulation.step(0.2, firing);
-    expect(small.hp).toBe(50);
-    expect(normal.hp).toBe(50);
-    expect(outOfRange.hp).toBe(75);
+    expect(small.hp).toBe(65);
+    expect(normal.hp).toBe(85);
+    expect(outOfRange.hp).toBe(110);
     expect(simulation.step(0.2, { firing: true, aim: { x: 2, z: 8 } })).toEqual([]);
     expect(simulation.state.shots).toBe(1);
     simulation.state.zombies = [outOfRange];
@@ -240,8 +247,12 @@ describe('magazines, switching and paused time', () => {
       expect(simulation.state.shots).toBe(1);
       const loaded = simulation.step(0.02, firing);
       expect(loaded).toContainEqual({ type: 'loaded', weapon });
+      if (WEAPONS[weapon].reloadType === 'round') {
+        expect(simulation.state.ammo[weapon]).toBe(1);
+        simulation.step(WEAPONS[weapon].fireInterval - WEAPONS[weapon].reloadTime + 0.02, firing);
+        expect(simulation.state.ammo[weapon]).toBe(0);
+      } else expect(simulation.state.ammo[weapon]).toBe(WEAPONS[weapon].magazine - 1);
       expect(simulation.state.shots).toBe(2);
-      expect(simulation.state.ammo[weapon]).toBe(WEAPONS[weapon].magazine - 1);
     },
   );
 
@@ -329,13 +340,15 @@ describe('finite levels', () => {
       const counts: Record<ZombieKind, number> = { normal: 3, runner: 0, tank: 0, small: 0 };
       let lastTankAt = 0;
       let totalEvents = 0;
+      let hordeEvents = 0;
       while (
         simulation.state.phase === 'playing' &&
         simulation.state.elapsed < definition.duration + 1
       ) {
         const events = simulation.step(0.1, idle);
         totalEvents += events.filter((event) => event.type === 'clear').length;
-        expect(simulation.state.zombies.length).toBeLessThanOrEqual(definition.batchSize);
+        hordeEvents += events.filter((event) => event.type === 'horde').length;
+        expect(simulation.state.zombies.length).toBeLessThanOrEqual(definition.batchSize * 2);
         for (const zombie of simulation.state.zombies) {
           counts[zombie.kind]++;
           expect(zombie.hp).toBe(ZOMBIES[zombie.kind].hp);
@@ -353,6 +366,7 @@ describe('finite levels', () => {
       expect(simulation.state.elapsed).toBeGreaterThanOrEqual(definition.duration);
       expect(simulation.state.phase).toBe(level === 5 ? 'victory' : 'cleared');
       expect(totalEvents).toBe(1);
+      expect(hordeEvents).toBe(1);
       expect(simulation.state.progress.coins).toBe(LEVEL_REWARDS[level - 1]);
       expect(simulation.step(10, idle)).toEqual([]);
       expect(simulation.state.progress.coins).toBe(LEVEL_REWARDS[level - 1]);
@@ -483,19 +497,19 @@ describe('Boss encounters', () => {
     expect(boss.hp).toBe(1600 - WEAPONS[weapon].damage * (weapon === 'sniper' ? 1.5 : 0.5));
   });
 
-  it('includes Boss bodies in nearest-target and sniper penetration ordering', () => {
+  it('includes Boss bodies in nearest-target ordering and stops sniper at a surviving Boss', () => {
     const simulation = setup();
     const boss = bossTarget('bulwark');
     const behind = target(1, 0, -4);
     simulation.state.boss = boss;
     simulation.state.zombies = [behind];
     simulation.step(0.2, firing);
-    expect(behind.hp).toBe(75);
+    expect(behind.hp).toBe(110);
     expect(boss.hp).toBe(1587.5);
     simulation.selectWeapon('sniper');
     simulation.step(0.01, firing);
-    expect(behind.hp).toBe(0);
-    expect(boss.hp).toBe(1317.5);
+    expect(behind.hp).toBe(110);
+    expect(boss.hp).toBe(1197.5);
   });
 
   it('requires all three explicit geometric weakpoint hits before exposing the core', () => {
@@ -533,11 +547,11 @@ describe('Boss encounters', () => {
     expect(boss.parts[0].hp).toBe(240);
     boss.z = 0;
     simulation.step(0.85, { firing: true, aim: bossPartPosition(boss, 0) });
-    expect(boss.parts.map((part) => part.hp)).toEqual([150, 240, 240]);
+    expect(boss.parts.map((part) => part.hp)).toEqual([100, 240, 240]);
     expect(boss.hp).toBe(900);
     simulation.step(0.85, { firing: true, aim: { x: 0, z: 0, bossPart: 100 } });
     expect(boss.hp).toBe(900);
-    expect(boss.parts.map((part) => part.hp)).toEqual([150, 240, 240]);
+    expect(boss.parts.map((part) => part.hp)).toEqual([100, 240, 240]);
   });
 
   it('telegraphs for two seconds, freezes on pause, then attacks on an eight-second cycle', () => {
@@ -603,7 +617,7 @@ describe('Boss encounters', () => {
         { type: 'coins', amount: BOSSES[kind].reward, at: { x: 0, z: 0, y: 1.5 } },
       ]);
       simulation.step(0.2, firing);
-      expect(behind.hp).toBe(50);
+      expect(behind.hp).toBe(85);
       expect(simulation.state.progress.coins).toBe(BOSSES[kind].reward);
     },
   );
@@ -653,7 +667,7 @@ describe('persistent rewards, upgrades and supplies', () => {
     const zombie = target(1);
     simulation.state.zombies = [zombie];
     simulation.step(0.1, firing);
-    expect(zombie.hp).toBe(45);
+    expect(zombie.hp).toBe(80);
     simulation.reload();
     expect(simulation.state.reloadRemaining).toBeCloseTo(1.62);
     for (const phase of ['over', 'cleared', 'victory'] as const) {
@@ -747,5 +761,298 @@ describe('persistent rewards, upgrades and supplies', () => {
     expect(simulation.state.boss).toBeNull();
     expect(simulation.state.invulnerable).toBe(0);
     expect(simulation.state.hp).toBe(125);
+  });
+});
+
+describe('finite reserves and interruptible round loading', () => {
+  it.each(['sniper', 'shotgun'] as const)(
+    '%s loads and deducts one reserve round at a time, then fires from a single round',
+    (weapon) => {
+      const simulation = setup();
+      simulation.selectWeapon(weapon);
+      simulation.state.ammo[weapon] = 0;
+      simulation.state.reserve[weapon] = 2;
+      simulation.reload();
+      simulation.step(WEAPONS[weapon].reloadTime - 0.01, firing);
+      expect(simulation.state.ammo[weapon]).toBe(0);
+      expect(simulation.state.reserve[weapon]).toBe(2);
+      expect(simulation.state.shots).toBe(0);
+      const events = simulation.step(0.02, firing);
+      expect(events).toContainEqual({ type: 'loaded', weapon });
+      expect(simulation.state.shots).toBe(1);
+      expect(simulation.state.ammo[weapon]).toBe(0);
+      expect(simulation.state.reserve[weapon]).toBe(1);
+      simulation.step(WEAPONS[weapon].fireInterval + 0.02, firing);
+      expect(simulation.state.shots).toBe(2);
+      expect(simulation.state.reserve[weapon]).toBe(0);
+      simulation.step(2, firing);
+      expect(simulation.state.shots).toBe(2);
+      expect(simulation.state.weapon).toBe(weapon);
+    },
+  );
+
+  it.each(['sniper', 'shotgun'] as const)(
+    '%s interrupted loading does not consume an unfinished round',
+    (weapon) => {
+      const simulation = setup();
+      simulation.selectWeapon(weapon);
+      simulation.state.ammo[weapon] = 2;
+      simulation.state.reserve[weapon] = 3;
+      simulation.reload();
+      simulation.step(0.2, idle);
+      simulation.step(0.01, firing);
+      expect(simulation.state.ammo[weapon]).toBe(1);
+      expect(simulation.state.reserve[weapon]).toBe(3);
+      expect(simulation.state.reloadRemaining).toBe(0);
+      simulation.reload();
+      simulation.step(0.2, idle);
+      simulation.selectWeapon('rifle');
+      expect(simulation.state.reserve[weapon]).toBe(3);
+      expect(simulation.state.ammo[weapon]).toBe(1);
+    },
+  );
+
+  it('fills a partial rifle magazine only with available reserve and leaves manual dry guns selected', () => {
+    const simulation = setup();
+    simulation.state.ammo.rifle = 4;
+    simulation.state.reserve.rifle = 7;
+    simulation.reload();
+    simulation.step(1.8, idle);
+    expect(simulation.state.ammo.rifle).toBe(11);
+    expect(simulation.state.reserve.rifle).toBe(0);
+    expect(simulation.reload()).toEqual([]);
+    simulation.step(4, firing);
+    expect(simulation.state.shots).toBe(11);
+    expect(simulation.state.weapon).toBe('rifle');
+    expect(simulation.state.ammo.rifle).toBe(0);
+  });
+
+  it('retry and next level replenish only the fixed level reserves and preserve the auto preference', () => {
+    const simulation = setup();
+    simulation.setAutoFire(true);
+    simulation.state.reserve.rifle = 0;
+    simulation.pause();
+    simulation.retry();
+    expect(simulation.state.reserve).toEqual(LEVELS[0].reserve);
+    expect(simulation.state.autoFire).toBe(true);
+    simulation.state.phase = 'cleared';
+    simulation.nextLevel();
+    expect(simulation.state.reserve).toEqual(LEVELS[1].reserve);
+    simulation.start();
+    expect(simulation.state.reserve).toEqual(LEVELS[0].reserve);
+    expect(simulation.state.autoFire).toBe(true);
+  });
+});
+
+describe('damage budgets, shotgun coverage and enemy reactions', () => {
+  it('spends sniper budget across more than three targets and stops exactly when exhausted', () => {
+    const simulation = setup();
+    simulation.selectWeapon('sniper');
+    const zombies = Array.from({ length: 5 }, (_, i) => target(i, 0, -i * 1.5, 'small'));
+    simulation.state.zombies = zombies;
+    const events = simulation.step(0.01, firing);
+    expect(zombies.map((zombie) => zombie.hp)).toEqual([0, 0, 0, 0, 65]);
+    expect(events.filter((event) => event.type === 'hit')).toHaveLength(4);
+    expect(simulation.state.hits).toBe(1);
+  });
+
+  it('charges actual armored health divided by the vulnerability multiplier to the sniper budget', () => {
+    const simulation = setup();
+    simulation.selectWeapon('sniper');
+    const boss = bossTarget('bulwark');
+    boss.hp = 150;
+    simulation.state.boss = boss;
+    const middle = target(1, 0, -4);
+    const far = target(2, 0, -7, 'tank');
+    simulation.state.zombies = [middle, far];
+    simulation.step(0.01, firing);
+    expect(boss.hp).toBe(0);
+    expect(middle.hp).toBe(0);
+    expect(far.hp).toBe(280);
+  });
+
+  it('cannot penetrate the brood shield with unspent sniper damage', () => {
+    const simulation = setup();
+    simulation.selectWeapon('sniper');
+    simulation.state.boss = bossTarget('brood');
+    const behind = target(1, 0, -5);
+    simulation.state.zombies = [behind];
+    simulation.step(0.01, firing);
+    expect(behind.hp).toBe(110);
+    expect(simulation.state.boss.hp).toBe(900);
+  });
+
+  it('shotgun covers intersecting edge circles at close range without random pellet misses', () => {
+    const simulation = setup();
+    simulation.selectWeapon('shotgun');
+    const edge = target(1, 2, 2);
+    const nearEdge = target(2, 0.9, 5.5, 'tank');
+    const outside = target(3, 3, 2);
+    simulation.state.zombies = [edge, nearEdge, outside];
+    const events = simulation.step(0.01, firing);
+    expect(edge.hp).toBe(0);
+    expect(nearEdge.hp).toBe(190);
+    expect(outside.hp).toBe(110);
+    const shot = events.find((event) => event.type === 'shot');
+    expect(shot?.type === 'shot' && shot.traces).toHaveLength(9);
+  });
+
+  it.each(Object.keys(ZOMBIES) as ZombieKind[])(
+    '%s is unable to attack or move during its own stagger duration',
+    (kind) => {
+      const simulation = setup();
+      const zombie = target(1, 0, 5.6, kind);
+      zombie.speed = 1;
+      simulation.state.zombies = [zombie];
+      simulation.step(0.01, firing);
+      expect(simulation.state.hp).toBe(100);
+      expect(zombie.z).toBe(5.6);
+      simulation.step(ZOMBIES[kind].stagger - 0.01, idle);
+      expect(simulation.state.hp).toBe(100);
+      simulation.step(0.03, idle);
+      expect(simulation.state.hp).toBe(90);
+    },
+  );
+
+  it('small enemies can dodge at most two consecutive firearm hits and dodge does not spend sniper budget', () => {
+    const simulation = new Simulation(() => 0);
+    simulation.start();
+    const small = target(1, 0, 0, 'small');
+    simulation.state.zombies = [small];
+    expect(simulation.step(0.4, firing).filter((event) => event.type === 'dodge')).toHaveLength(2);
+    expect(small.hp).toBe(65);
+    simulation.step(0.2, firing);
+    expect(small.hp).toBe(40);
+    expect(small.dodgeStreak).toBe(0);
+    simulation.selectWeapon('sniper');
+    const behind = target(2, 0, -3, 'tank');
+    simulation.state.zombies.push(behind);
+    simulation.step(0.01, firing);
+    expect(small.hp).toBe(40);
+    expect(behind.hp).toBe(70);
+  });
+});
+
+describe('manual grenades and optional automatic firing', () => {
+  it('grenades validate and clamp targets, deduct once, freeze on pause and cannot be spammed in flight', () => {
+    const simulation = setup();
+    simulation.state.progress.grenades = 3;
+    for (const aim of [
+      { x: NaN, z: 0 },
+      { x: 0, z: Infinity },
+      { x: 0, z: 8 },
+    ])
+      expect(simulation.throwGrenade(aim)).toEqual([]);
+    expect(simulation.state.progress.grenades).toBe(3);
+    expect(simulation.throwGrenade({ x: 0, z: -100 })).toHaveLength(1);
+    expect(simulation.state.grenades[0].to.z).toBe(-15);
+    expect(simulation.throwGrenade({ x: 0, z: 0 })).toEqual([]);
+    expect(simulation.state.progress.grenades).toBe(2);
+    simulation.pause();
+    const before = structuredClone(simulation.state);
+    expect(simulation.step(5, firing)).toEqual([]);
+    expect(simulation.throwGrenade({ x: 0, z: 0 })).toEqual([]);
+    expect(simulation.state).toEqual(before);
+    simulation.resume();
+    expect(simulation.step(0.65, idle).filter((event) => event.type === 'explosion')).toHaveLength(
+      1,
+    );
+    expect(simulation.state.grenades).toHaveLength(0);
+    expect(simulation.step(1, idle).filter((event) => event.type === 'explosion')).toHaveLength(0);
+  });
+
+  it('grenade AOE kills ordinary groups without dodge and awards each kill only once', () => {
+    const simulation = new Simulation(() => 0);
+    simulation.start();
+    simulation.state.progress.grenades = 1;
+    const normal = target(1, 0, 0);
+    const tank = target(2, 2, 0, 'tank');
+    const small = target(3, -2, 0, 'small');
+    const outside = target(4, 7, 0);
+    simulation.state.zombies = [normal, tank, small, outside];
+    simulation.throwGrenade({ x: 0, z: 0 });
+    const events = simulation.step(0.65, idle);
+    expect([normal.hp, tank.hp, small.hp, outside.hp]).toEqual([0, 0, 0, 110]);
+    expect(events.some((event) => event.type === 'dodge')).toBe(false);
+    expect(simulation.state.kills).toBe(3);
+    expect(simulation.state.progress.coins).toBe(20);
+    simulation.step(1, idle);
+    expect(simulation.state.progress.coins).toBe(20);
+  });
+
+  it.each(['bulwark', 'brood'] as const)(
+    'grenades cannot kill a healthy %s or bypass the brood shield',
+    (kind) => {
+      const simulation = setup();
+      const boss = bossTarget(kind);
+      simulation.state.boss = boss;
+      simulation.state.progress.grenades = 2;
+      simulation.throwGrenade({ x: 0, z: 0, bossPart: 1 });
+      simulation.step(0.65, idle);
+      expect(boss.hp).toBe(kind === 'bulwark' ? 1510 : 900);
+      if (kind === 'brood') {
+        expect(boss.parts.map((part) => part.hp)).toEqual([240, 180, 240]);
+        boss.parts.forEach((part) => (part.hp = 0));
+        simulation.throwGrenade({ x: 0, z: 0 });
+        simulation.step(0.65, idle);
+        expect(boss.hp).toBe(810);
+      }
+    },
+  );
+
+  it('auto mode switches only a dry gun or one with no in-range target, while manual mode remains manual', () => {
+    const simulation = setup();
+    const zombie = target(1, 0, -15);
+    simulation.state.zombies = [zombie];
+    simulation.selectWeapon('shotgun');
+    simulation.step(0.01, idle);
+    expect(simulation.state.weapon).toBe('shotgun');
+    expect(simulation.state.shots).toBe(0);
+    simulation.setAutoFire(true);
+    simulation.step(0.01, idle);
+    expect(simulation.state.weapon).toBe('rifle');
+    expect(zombie.hp).toBe(85);
+    simulation.state.ammo.rifle = 0;
+    simulation.state.reserve.rifle = 0;
+    simulation.step(0.21, idle);
+    expect(simulation.state.weapon).toBe('sniper');
+    expect(zombie.hp).toBe(0);
+    simulation.setAutoFire(false);
+    expect(simulation.state.autoAim).toBeNull();
+  });
+
+  it('auto waits for an empty loaded gun instead of switching and does not spend grenades', () => {
+    const simulation = setup();
+    simulation.setAutoFire(true);
+    simulation.state.progress.grenades = 3;
+    simulation.selectWeapon('sniper');
+    simulation.state.ammo.sniper = 0;
+    simulation.state.reserve.sniper = 1;
+    simulation.state.zombies = [target(1)];
+    simulation.step(0.4, idle);
+    expect(simulation.state.weapon).toBe('sniper');
+    expect(simulation.state.shots).toBe(0);
+    simulation.step(0.4, idle);
+    expect(simulation.state.shots).toBe(1);
+    expect(simulation.state.progress.grenades).toBe(3);
+  });
+
+  it('auto targets live brood weakpoints and remains idle with every gun exhausted', () => {
+    const simulation = setup();
+    const boss = bossTarget('brood');
+    simulation.state.boss = boss;
+    simulation.setAutoFire(true);
+    simulation.step(0.01, idle);
+    expect(simulation.state.autoAim?.bossPart).toBeDefined();
+    expect(boss.parts.some((part) => part.hp < 240)).toBe(true);
+    simulation.state.ammo = { rifle: 0, sniper: 0, shotgun: 0 };
+    simulation.state.reserve = { rifle: 0, sniper: 0, shotgun: 0 };
+    const shots = simulation.state.shots;
+    const weapon = simulation.state.weapon;
+    simulation.step(2, idle);
+    expect(simulation.state.shots).toBe(shots);
+    expect(simulation.state.weapon).toBe(weapon);
+    expect(simulation.state.autoAim).toBeNull();
+    expect(simulation.state.autoFire).toBe(true);
   });
 });

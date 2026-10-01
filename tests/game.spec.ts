@@ -3,6 +3,7 @@ import {
   LEVELS,
   RULES,
   WEAPONS,
+  ZOMBIES,
   levelTotal,
   type GameState,
   type Point,
@@ -91,9 +92,10 @@ async function advanceUntil(page: Page, condition: (state: Snapshot) => boolean,
 
 async function fireControlled(page: Page) {
   const before = await snapshot(page);
-  const target = await nearestTarget(page);
-  expect(target).not.toBeNull();
-  await page.mouse.move(target!.x, target!.y);
+  const target =
+    (await nearestTarget(page)) ??
+    (await page.evaluate(() => window.__game.project({ x: 0, z: -10 })));
+  await page.mouse.move(target.x, target.y);
   await page.mouse.down();
   try {
     await advanceUntil(page, (state) => state.shots > before.shots, 5);
@@ -107,7 +109,7 @@ function expectFreshLevel(state: Snapshot, level: number, weapon: WeaponId) {
   expect(state.phase).toBe('playing');
   expect(state.level).toBe(level);
   expect(state.weapon).toBe(weapon);
-  expect(state.hp).toBe(RULES.maxHp);
+  expect(state.hp).toBe(state.maxHp);
   expect(state.kills).toBe(0);
   expect(state.shots).toBe(0);
   expect(state.hits).toBe(0);
@@ -117,6 +119,8 @@ function expectFreshLevel(state: Snapshot, level: number, weapon: WeaponId) {
   expect(state.ammo).toEqual(
     Object.fromEntries(Object.entries(WEAPONS).map(([id, weapon]) => [id, weapon.magazine])),
   );
+  expect(state.reserve).toEqual(LEVELS[level - 1].reserve);
+  expect(state.grenades).toHaveLength(0);
   expect(state.zombies).toHaveLength(state.spawned);
   expect(state.zombies.every((zombie) => zombie.hp === zombie.maxHp)).toBe(true);
   expect(state.render.effects).toBe(0);
@@ -146,8 +150,9 @@ test('start, aim, hold fire, kill, and release', async ({ page }) => {
   await fireAtNearest(page);
 
   const afterShooting = await snapshot(page);
-  expect(afterShooting.shots).toBeGreaterThanOrEqual(3);
-  expect(afterShooting.hits).toBeGreaterThanOrEqual(3);
+  const requiredHits = Math.ceil(ZOMBIES.normal.hp / WEAPONS.rifle.damage);
+  expect(afterShooting.shots).toBeGreaterThanOrEqual(requiredHits);
+  expect(afterShooting.hits).toBeGreaterThanOrEqual(requiredHits);
   expect(afterShooting.kills).toBeGreaterThan(0);
   expect(afterShooting.firing).toBe(false);
   await expect(page.locator('#kills')).toHaveText(afterShooting.kills.toString().padStart(2, '0'));
@@ -348,6 +353,86 @@ test('an empty magazine automatically reloads and held fire resumes', async ({ p
   }
 });
 
+for (const weapon of ['sniper', 'shotgun'] as const) {
+  test(`${weapon} loads individual rounds, pauses, and can fire before loading the next round`, async ({
+    page,
+  }) => {
+    await startControlled(page);
+    await page.keyboard.press(weapon === 'sniper' ? '2' : '3');
+    await fireControlled(page);
+    const fired = await fireControlled(page);
+    await page.keyboard.press('r');
+    const oneLoaded = await advanceUntil(
+      page,
+      (state) => state.ammo[weapon] === fired.ammo[weapon] + 1,
+      WEAPONS[weapon].reloadTime + 1,
+    );
+    expect(oneLoaded.reserve[weapon]).toBe(fired.reserve[weapon] - 1);
+    expect(oneLoaded.reloadRemaining).toBeGreaterThan(0);
+    await page.keyboard.press('Escape');
+    await page.clock.fastForward(5_000);
+    const paused = await snapshot(page);
+    expect(paused.ammo).toEqual(oneLoaded.ammo);
+    expect(paused.reserve).toEqual(oneLoaded.reserve);
+    expect(paused.reloadRemaining).toBe(oneLoaded.reloadRemaining);
+    await page.keyboard.press('Escape');
+    const interrupted = await fireControlled(page);
+    expect(interrupted.ammo[weapon]).toBe(oneLoaded.ammo[weapon] - 1);
+    expect(interrupted.reserve[weapon]).toBe(oneLoaded.reserve[weapon]);
+    expect(interrupted.reloadRemaining).toBe(0);
+
+    while ((await snapshot(page)).ammo[weapon] > 0) await fireControlled(page);
+    const empty = await snapshot(page);
+    expect(empty.reloadRemaining).toBeGreaterThan(0);
+    await page.mouse.down();
+    const resumed = await advanceUntil(
+      page,
+      (state) => state.shots > empty.shots,
+      WEAPONS[weapon].reloadTime + WEAPONS[weapon].fireInterval + 1,
+    );
+    await page.mouse.up();
+    expect(resumed.shots).toBe(empty.shots + 1);
+    expect(resumed.ammo[weapon]).toBe(0);
+    expect(resumed.reserve[weapon]).toBe(empty.reserve[weapon] - 1);
+    expect(resumed.reloadRemaining).toBeGreaterThan(0);
+  });
+}
+
+test('optional auto fire pauses, resumes, and switches only after the rifle supply is exhausted', async ({
+  page,
+}) => {
+  await startControlled(page);
+  await page.clock.fastForward(250);
+  expect((await snapshot(page)).shots).toBe(0);
+  await page.getByRole('button', { name: '自动射击', exact: true }).click();
+  await expect(page.locator('#auto-fire')).toHaveAttribute('aria-pressed', 'true');
+  const shooting = await advanceUntil(page, (state) => state.kills > 0, 5);
+  expect(shooting.autoFire).toBe(true);
+  expect(shooting.firing).toBe(false);
+  await page.keyboard.press('Escape');
+  const paused = await snapshot(page);
+  await page.clock.fastForward(5_000);
+  expect((await snapshot(page)).shots).toBe(paused.shots);
+  expect((await snapshot(page)).reserve).toEqual(paused.reserve);
+  await page.keyboard.press('Escape');
+  await advanceUntil(page, (state) => state.shots > paused.shots, 5);
+  const loading = await advanceUntil(page, (state) => state.reloadRemaining > 0, 35);
+  expect(loading.weapon).toBe('rifle');
+  expect(loading.reserve.rifle).toBeGreaterThan(0);
+  const switched = await advanceUntil(
+    page,
+    (state) => state.weapon !== 'rifle',
+    LEVELS[0].duration,
+  );
+  expect(switched.ammo.rifle + switched.reserve.rifle).toBe(0);
+  expect(switched.autoFire).toBe(true);
+  await page.keyboard.press('f');
+  const manual = await snapshot(page);
+  expect(manual.autoFire).toBe(false);
+  await page.clock.fastForward(250);
+  expect((await snapshot(page)).shots).toBe(manual.shots);
+});
+
 test('natural death and R retry reset the current level and preserve the selected weapon', async ({
   page,
 }) => {
@@ -375,37 +460,8 @@ test('clear level one, advance to level two, and retry that level after defeat',
 }) => {
   test.setTimeout(180_000);
   await startControlled(page);
-  await page.keyboard.press('2');
-  let holding = false;
-  try {
-    for (let frame = 0; frame < (LEVELS[0].duration + 45) * 4; frame++) {
-      const state = await snapshot(page);
-      if (state.phase === 'cleared') break;
-      expect(state.phase, 'The defender must survive the first level').toBe('playing');
-      const target = await nearestTarget(page);
-      if (target) {
-        await page.mouse.move(target.x, target.y);
-        if (!holding) {
-          await page.mouse.down();
-          holding = true;
-        }
-      } else {
-        if (holding) {
-          await page.mouse.up();
-          holding = false;
-        }
-        if (
-          state.reloadRemaining === 0 &&
-          state.ammo[state.weapon] < WEAPONS[state.weapon].magazine
-        ) {
-          await page.keyboard.press('r');
-        }
-      }
-      await page.clock.fastForward(250);
-    }
-  } finally {
-    await page.mouse.up();
-  }
+  await page.locator('#auto-fire').click();
+  await advanceUntil(page, (state) => state.phase === 'cleared', LEVELS[0].duration + 60);
   await expect(page.getByRole('dialog', { name: '关卡完成' })).toBeVisible();
   await page.setViewportSize({ width: 1280, height: 720 });
   const clearPanel = page.getByRole('dialog', { name: '关卡完成' });
@@ -427,11 +483,13 @@ test('clear level one, advance to level two, and retry that level after defeat',
   expect(stillCleared.elapsed).toBe(cleared.elapsed);
   expect(stillCleared.spawned).toBe(cleared.spawned);
   await page.getByRole('button', { name: '下一关', exact: true }).click();
-  expectFreshLevel(await snapshot(page), 2, 'sniper');
+  expectFreshLevel(await snapshot(page), 2, cleared.weapon);
+  expect((await snapshot(page)).autoFire).toBe(true);
+  await page.locator('#auto-fire').click();
   await advanceUntil(page, (state) => state.phase === 'over', 45);
   await expect(page.getByRole('dialog', { name: '防线失守' })).toBeVisible();
   await page.getByRole('button', { name: '重试本关', exact: true }).click();
-  expectFreshLevel(await snapshot(page), 2, 'sniper');
+  expectFreshLevel(await snapshot(page), 2, cleared.weapon);
 });
 
 test.describe('phone viewport', () => {

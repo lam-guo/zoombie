@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { BOSSES, bossPartPosition, LEVELS, WEAPONS, WEAPON_IDS, ZOMBIES } from './types';
+import { BOSSES, bossPartPosition, LEVELS, RULES, WEAPONS, WEAPON_IDS, ZOMBIES } from './types';
 import type { Boss, BossKind, GameEvent, GameState, Point, WeaponId, Zombie } from './types';
 import { getReloadMultiplier } from './economy';
 
@@ -15,6 +15,7 @@ type Actor = {
   armor: THREE.Group;
   health: THREE.Group;
   healthFill: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  dodge: THREE.Sprite;
 };
 
 type Effect = {
@@ -22,6 +23,24 @@ type Effect = {
   life: number;
   duration: number;
   velocity: THREE.Vector3;
+};
+
+type Tracer = Effect & {
+  origin: THREE.Vector3;
+  glow: THREE.Mesh;
+  length: number;
+  segment: number;
+  fresh: boolean;
+};
+
+type Explosion = {
+  root: THREE.Group;
+  ring: THREE.Mesh;
+  fire: THREE.Mesh;
+  smoke: THREE.Mesh;
+  life: number;
+  radius: number;
+  fresh: boolean;
 };
 
 type BossModel = {
@@ -58,9 +77,12 @@ export class World {
   private readonly textures = new Set<THREE.Texture>();
   private readonly actors = new Map<number, Actor>();
   private readonly spareActors: Actor[] = [];
-  private readonly tracers: Effect[] = [];
+  private readonly tracers: Tracer[] = [];
   private readonly sparks: Effect[] = [];
   private readonly coins: Effect[] = [];
+  private readonly explosions: Explosion[] = [];
+  private readonly grenade = new THREE.Group();
+  private readonly grenadeMarker = new THREE.Group();
   private readonly bosses = new Map<BossKind, BossModel>();
   private boss: Boss | null = null;
   private readonly bossWarning = new THREE.Group();
@@ -83,6 +105,9 @@ export class World {
   private readonly sun: THREE.DirectionalLight;
   private zoneMaterial!: THREE.MeshStandardMaterial;
   private lampMaterial!: THREE.MeshBasicMaterial;
+  private readonly lampColor = new THREE.Color();
+  private readonly alertColor = new THREE.Color('#ff8055');
+  private dodgeMaterial?: THREE.SpriteMaterial;
   private readonly levelLabels: THREE.CanvasTexture[] = [];
   private readonly cameraPosition = new THREE.Vector3(7.5, 25, 27);
   private readonly cameraTarget = new THREE.Vector3(0, 0, -4.5);
@@ -181,6 +206,8 @@ export class World {
         this.tracers.filter((effect) => effect.life > 0).length +
         this.sparks.filter((effect) => effect.life > 0).length +
         this.coins.filter((effect) => effect.life > 0).length +
+        this.explosions.filter((effect) => effect.life > 0).length +
+        Number(this.grenade.visible) +
         Number(this.flashTime > 0),
     };
   }
@@ -453,6 +480,7 @@ export class World {
     this.sky.color.set('#d4e3d0').lerp(accent, 0.24);
     this.sun.color.set('#f5dfb5').lerp(accent, 0.3);
     this.lampMaterial.color.set('#ffda85').lerp(accent, 0.55);
+    this.lampColor.copy(this.lampMaterial.color);
     this.zoneMaterial.map = this.levelLabels[index];
     this.currentLevel = level;
   }
@@ -577,6 +605,18 @@ export class World {
     health.position.y = 2.2;
     health.visible = false;
     root.add(health);
+    this.dodgeMaterial ??= this.material(
+      new THREE.SpriteMaterial({
+        map: this.textTexture('闪避', '#b7ffdf'),
+        transparent: true,
+        depthWrite: false,
+        toneMapped: false,
+      }),
+    );
+    const dodge = new THREE.Sprite(this.dodgeMaterial);
+    dodge.position.y = 2.7;
+    dodge.visible = false;
+    root.add(dodge);
     if (soldier) {
       arms[0].rotation.set(1.05, 0, 0.75);
       arms[1].rotation.set(1.35, 0, 0.1);
@@ -588,7 +628,7 @@ export class World {
     root.traverse((object) => {
       if (object instanceof THREE.Mesh) object.castShadow = false;
     });
-    return { root, body, head, arms, legs, skin, cloth, shadow, armor, health, healthFill };
+    return { root, body, head, arms, legs, skin, cloth, shadow, armor, health, healthFill, dodge };
   }
 
   private buildWeapons(): void {
@@ -736,7 +776,7 @@ export class World {
   }
 
   private buildEffects(): void {
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 24; i++) {
       const mesh = new THREE.Mesh(
         this.cylinder,
         this.material(
@@ -745,12 +785,40 @@ export class World {
             transparent: true,
             opacity: 0.85,
             depthWrite: false,
+            toneMapped: false,
+            fog: false,
           }),
         ),
       );
+      const glow = new THREE.Mesh(
+        this.cylinder,
+        this.material(
+          new THREE.MeshBasicMaterial({
+            color: '#ffe9ab',
+            transparent: true,
+            opacity: 0.22,
+            depthWrite: false,
+            toneMapped: false,
+            fog: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        ),
+      );
+      glow.scale.set(2.6, 1, 2.6);
+      mesh.add(glow);
       mesh.visible = false;
       this.scene.add(mesh);
-      this.tracers.push({ mesh, life: 0, duration: 0.07, velocity: new THREE.Vector3() });
+      this.tracers.push({
+        mesh,
+        glow,
+        life: 0,
+        duration: 0.18,
+        velocity: new THREE.Vector3(),
+        origin: new THREE.Vector3(),
+        length: 0,
+        segment: 0,
+        fresh: false,
+      });
     }
     for (let i = 0; i < 48; i++) {
       const mesh = new THREE.Mesh(
@@ -782,6 +850,82 @@ export class World {
       mesh.visible = false;
       this.scene.add(mesh);
       this.coins.push({ mesh, life: 0, duration: 0.8, velocity: new THREE.Vector3() });
+    }
+    this.buildGrenadeEffects();
+  }
+
+  private buildGrenadeEffects(): void {
+    const shell = new THREE.Mesh(this.sphere, this.surface('#6a7951', 0.55, 0.4));
+    shell.scale.set(0.18, 0.23, 0.18);
+    this.grenade.add(shell);
+    this.box(this.grenade, this.surface('#d5bc6b'), 0, 0.23, 0, 0.1, 0.12, 0.1, false);
+    const fuse = new THREE.Mesh(
+      this.sphere,
+      this.material(new THREE.MeshBasicMaterial({ color: '#ffde93', toneMapped: false })),
+    );
+    fuse.position.y = 0.3;
+    fuse.scale.setScalar(0.075);
+    this.grenade.add(fuse);
+    this.grenade.visible = false;
+    this.scene.add(this.grenade);
+    const ringGeometry = this.geometry(new THREE.RingGeometry(0.96, 1, 56));
+    const marker = new THREE.Mesh(
+      ringGeometry,
+      this.material(
+        new THREE.MeshBasicMaterial({
+          color: '#ffcf81',
+          transparent: true,
+          opacity: 0.65,
+          depthWrite: false,
+          toneMapped: false,
+        }),
+      ),
+    );
+    marker.rotation.x = -Math.PI / 2;
+    this.grenadeMarker.add(marker);
+    this.grenadeMarker.visible = false;
+    this.scene.add(this.grenadeMarker);
+    for (let i = 0; i < 3; i++) {
+      const root = new THREE.Group();
+      const ring = new THREE.Mesh(
+        ringGeometry,
+        this.material(
+          new THREE.MeshBasicMaterial({
+            color: '#ffce83',
+            transparent: true,
+            depthWrite: false,
+            toneMapped: false,
+          }),
+        ),
+      );
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = 0.07;
+      const fire = new THREE.Mesh(
+        this.sphere,
+        this.material(
+          new THREE.MeshBasicMaterial({
+            color: '#ffd693',
+            transparent: true,
+            depthWrite: false,
+            toneMapped: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        ),
+      );
+      const smoke = new THREE.Mesh(
+        this.sphere,
+        this.material(
+          new THREE.MeshBasicMaterial({
+            color: '#9e9e86',
+            transparent: true,
+            depthWrite: false,
+          }),
+        ),
+      );
+      root.add(ring, fire, smoke);
+      root.visible = false;
+      this.scene.add(root);
+      this.explosions.push({ root, ring, fire, smoke, life: 0, radius: 0, fresh: false });
     }
   }
 
@@ -955,23 +1099,21 @@ export class World {
         );
         this.player.root.updateMatrixWorld(true);
         const origin = this.muzzle.getWorldPosition(this.vector);
-        if (event.weapon === 'shotgun') {
-          const facing = Math.atan2(event.to.x - event.from.x, event.to.z - event.from.z);
-          for (let i = 0; i < 5; i++) {
-            const angle =
-              facing - WEAPONS.shotgun.halfAngle + (i / 4) * WEAPONS.shotgun.halfAngle * 2;
-            const to = {
-              x: event.from.x + Math.sin(angle) * WEAPONS.shotgun.range,
-              y: event.to.y,
-              z: event.from.z + Math.cos(angle) * WEAPONS.shotgun.range,
-            };
-            this.addTracer(origin, event.from, to, event.weapon, false);
-          }
-        } else {
-          this.addTracer(origin, event.from, event.to, event.weapon, event.hit);
-        }
+        for (const trace of event.traces ?? [{ to: event.to, hit: event.hit }])
+          this.addTracer(origin, event.from, trace.to, event.weapon, trace.hit);
       } else if (event.type === 'hit') {
         this.burst(event.at, event.killed ? 8 : 4, '#e4c587');
+      } else if (event.type === 'dodge') {
+        this.burst(event.at, 4, '#b7ffdf');
+      } else if (event.type === 'explosion') {
+        const explosion = this.explosions.find((effect) => effect.life <= 0) ?? this.explosions[0];
+        explosion.root.position.set(event.at.x, 0, event.at.z);
+        explosion.radius = event.radius;
+        explosion.life = 0.6;
+        explosion.fresh = true;
+        explosion.root.visible = true;
+        this.burst({ ...event.at, y: 0.4 }, 22, '#ffc680', 2.2);
+        this.trauma = Math.max(this.trauma, 0.65);
       } else if (event.type === 'bossBreak') {
         this.burst(event.at, 18, '#c9f4a0', 1.7);
         this.trauma = 0.3;
@@ -1033,14 +1175,20 @@ export class World {
     // A point-blank hit can fall inside the barrel. Keep its hit feedback without a backwards tracer.
     if (forwardDistance <= 0) return;
     const tracer = this.tracers.find((effect) => effect.life <= 0) ?? this.tracers[0];
-    const length = this.direction.length();
-    tracer.mesh.position.copy(origin).addScaledVector(this.direction, 0.5);
-    tracer.mesh.quaternion.setFromUnitVectors(UP, this.direction.normalize());
-    const thickness = weapon === 'sniper' ? 0.026 : 0.015;
-    tracer.mesh.scale.set(thickness, length, thickness);
-    (tracer.mesh.material as THREE.MeshBasicMaterial).color.set(WEAPONS[weapon].color);
-    tracer.duration = weapon === 'sniper' ? 0.13 : 0.07;
+    tracer.length = this.direction.length();
+    tracer.segment = weapon === 'rifle' ? Math.min(2.5, tracer.length) : tracer.length;
+    tracer.origin.copy(origin);
+    tracer.velocity.copy(this.direction).normalize();
+    tracer.mesh.position.copy(origin).addScaledVector(tracer.velocity, tracer.segment * 0.5);
+    tracer.mesh.quaternion.setFromUnitVectors(UP, tracer.velocity);
+    const thickness = weapon === 'sniper' ? 0.075 : 0.038;
+    tracer.mesh.scale.set(thickness, tracer.segment, thickness);
+    const color = { rifle: '#ffe28d', sniper: '#83e6ff', shotgun: '#ffb46f' }[weapon];
+    (tracer.mesh.material as THREE.MeshBasicMaterial).color.set(color);
+    (tracer.glow.material as THREE.MeshBasicMaterial).color.set(color);
+    tracer.duration = weapon === 'sniper' ? 0.22 : 0.18;
     tracer.life = tracer.duration;
+    tracer.fresh = true;
     tracer.mesh.visible = true;
   }
 
@@ -1062,7 +1210,11 @@ export class World {
               : 5.2) +
       zombie.id * 1.7;
     const attacking = dx * dx + dz * dz < 2.8;
-    actor.health.visible = !dead && (zombie.hp < zombie.maxHp || zombie.kind === 'tank');
+    const dodging = !dead && zombie.dodgeRemaining > 0;
+    actor.dodge.visible = dodging;
+    actor.dodge.scale.set(3.8 / actor.root.scale.x, 0.95 / actor.root.scale.y, 1);
+    actor.health.visible =
+      !dead && !dodging && (zombie.hp < zombie.maxHp || zombie.kind === 'tank');
     actor.health.quaternion.copy(actor.root.quaternion).invert().multiply(this.camera.quaternion);
     const healthRatio = Math.max(0, Math.min(1, zombie.hp / zombie.maxHp));
     actor.healthFill.scale.x = 0.9 * healthRatio;
@@ -1071,6 +1223,7 @@ export class World {
     actor.cloth.emissive.set(zombie.hitTime > 0 ? '#8d7956' : '#000000');
     actor.skin.emissiveIntensity = actor.cloth.emissiveIntensity = Math.min(1, zombie.hitTime * 7);
     if (dead) {
+      actor.body.scale.y = 1;
       const fall = Math.min(1, zombie.deadTime / 0.42);
       actor.body.rotation.x = fall * Math.PI * 0.48;
       actor.body.position.y = -Math.max(0, zombie.deadTime - 1.0) * 0.62;
@@ -1080,22 +1233,34 @@ export class World {
       actor.arms[0].rotation.x = actor.arms[1].rotation.x = 0.45 * (1 - fall);
       actor.legs[0].rotation.x = actor.legs[1].rotation.x = 0;
     } else {
-      actor.body.position.y = Math.abs(Math.sin(stride)) * 0.045;
+      const tank = zombie.kind === 'tank';
+      const runner = zombie.kind === 'runner';
+      const stagger = Math.min(1, zombie.staggerRemaining / ZOMBIES[zombie.kind].stagger);
+      const dodge = Math.min(1, zombie.dodgeRemaining / 0.12);
+      const attackPhase = Math.max(0, Math.min(1, zombie.attackCooldown / RULES.attackInterval));
+      const strike = attacking ? Math.max(0, (attackPhase - 0.68) / 0.32) : 0;
+      const windup = attacking ? Math.max(0, (0.3 - attackPhase) / 0.3) : 0;
+      const motion = 1 - stagger * 0.9;
+      const recoil = stagger * (tank ? 0.025 : runner ? 0.26 : 0.15);
+      actor.body.scale.y = 1 - dodge * 0.14;
+      actor.body.position.y = Math.abs(Math.sin(stride)) * (tank ? 0.018 : 0.055) * motion;
       actor.body.rotation.set(
-        zombie.hitTime > 0 ? -zombie.hitTime * 0.7 : zombie.kind === 'runner' ? 0.22 : 0.055,
+        (runner ? -0.1 : -0.035) + recoil - strike * 0.1 - dodge * 0.09,
         0,
-        Math.sin(stride * 0.5) * 0.04,
+        Math.sin(stride * 0.5) * (tank ? 0.022 : 0.045) * motion +
+          dodge * (zombie.id % 2 ? 0.19 : -0.19),
       );
-      actor.head.rotation.x = 0.12 + Math.sin(stride * 0.5) * 0.04;
+      actor.head.rotation.x = 0.12 + windup * 0.15 - recoil * 0.3;
       actor.shadow.scale.set(1.55, 1.25, 1);
-      actor.legs[0].rotation.x = attacking ? 0.08 : Math.sin(stride) * 0.35;
-      actor.legs[1].rotation.x = attacking ? -0.08 : -Math.sin(stride) * 0.35;
+      const step = Math.sin(stride) * (tank ? 0.22 : runner ? 0.52 : 0.39) * motion;
+      actor.legs[0].rotation.x = attacking ? 0.12 + strike * 0.12 : step;
+      actor.legs[1].rotation.x = attacking ? -0.12 : -step;
       actor.arms[0].rotation.x = attacking
-        ? 1.15 + Math.sin(this.time * 7) * 0.42
-        : 0.7 + Math.sin(stride) * 0.15;
+        ? 0.95 + windup * 1.0 - strike * 0.5
+        : 0.9 + Math.sin(stride) * (runner ? 0.34 : 0.22) * motion + recoil;
       actor.arms[1].rotation.x = attacking
-        ? 1.15 + Math.sin(this.time * 7 + 0.7) * 0.42
-        : 0.85 - Math.sin(stride) * 0.15;
+        ? 1.2 + windup * 0.5 - strike * 0.35
+        : 1.0 - Math.sin(stride) * (runner ? 0.3 : 0.16) * motion + recoil;
     }
   }
 
@@ -1157,10 +1322,29 @@ export class World {
     warningMaterial.opacity = 0.42 + windup * 0.25 + Math.sin(this.time * 14) * 0.13;
   }
 
+  private animateGrenade(state: GameState): void {
+    const grenade = state.grenades[0];
+    this.grenade.visible = this.grenadeMarker.visible = grenade !== undefined;
+    if (!grenade) return;
+    const progress = Math.min(1, grenade.elapsed / grenade.duration);
+    this.grenade.position.set(
+      THREE.MathUtils.lerp(grenade.from.x, grenade.to.x, progress),
+      (grenade.from.y ?? 1.5) * (1 - progress) + 0.15 * progress + 13.6 * progress * (1 - progress),
+      THREE.MathUtils.lerp(grenade.from.z, grenade.to.z, progress),
+    );
+    this.grenade.rotation.set(grenade.elapsed * 12, 0, grenade.elapsed * 8);
+    this.grenadeMarker.position.set(grenade.to.x, 0.065, grenade.to.z);
+    this.grenadeMarker.scale.setScalar(grenade.radius);
+  }
+
   render(state: GameState, aim: Point, dt: number): void {
     this.time += dt;
     this.animateBoss(state);
+    this.animateGrenade(state);
     if (this.currentLevel !== state.level) this.setLevel(state.level);
+    this.lampMaterial.color.copy(this.lampColor);
+    if (state.hordeRemaining > 0)
+      this.lampMaterial.color.lerp(this.alertColor, 0.5 + Math.sin(this.time * 9) * 0.4);
     if (this.currentWeapon !== state.weapon) this.setWeapon(state.weapon);
     const present = new Set(state.zombies.map((zombie) => zombie.id));
     for (const [id, actor] of this.actors) {
@@ -1243,9 +1427,21 @@ export class World {
     this.recoveryRing.scale.setScalar(1 + Math.sin(this.time * 7) * 0.1);
 
     for (const effect of this.tracers) {
-      effect.life = Math.max(0, effect.life - dt);
+      // Events arrive after the simulation step; every new shot must survive its first render.
+      if (!effect.fresh) effect.life = Math.max(0, effect.life - dt);
+      effect.fresh = false;
       effect.mesh.visible = effect.life > 0;
-      (effect.mesh.material as THREE.MeshBasicMaterial).opacity = effect.life / effect.duration;
+      if (effect.life <= 0) continue;
+      const progress = 1 - effect.life / effect.duration;
+      effect.mesh.position
+        .copy(effect.origin)
+        .addScaledVector(
+          effect.velocity,
+          effect.segment * 0.5 + (effect.length - effect.segment) * progress,
+        );
+      const opacity = Math.min(1, (effect.life / effect.duration) * 1.7);
+      (effect.mesh.material as THREE.MeshBasicMaterial).opacity = opacity;
+      (effect.glow.material as THREE.MeshBasicMaterial).opacity = opacity * 0.24;
     }
     for (const effect of this.sparks) {
       if (effect.life <= 0) continue;
@@ -1263,6 +1459,22 @@ export class World {
       coin.velocity.y -= 1.8 * dt;
       coin.mesh.rotation.z += dt * 6;
       (coin.mesh.material as THREE.MeshBasicMaterial).opacity = Math.min(1, coin.life / 0.25);
+    }
+    for (const effect of this.explosions) {
+      if (!effect.fresh) effect.life = Math.max(0, effect.life - dt);
+      effect.fresh = false;
+      effect.root.visible = effect.life > 0;
+      if (effect.life <= 0) continue;
+      const progress = 1 - effect.life / 0.6;
+      effect.ring.scale.setScalar(effect.radius * (0.22 + progress * 0.78));
+      (effect.ring.material as THREE.MeshBasicMaterial).opacity = (1 - progress) * 0.9;
+      effect.fire.position.y = 0.65;
+      effect.fire.scale.setScalar(0.5 + Math.min(1, progress * 4) * 1.1);
+      (effect.fire.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 1 - progress * 2.7);
+      effect.smoke.position.y = 0.4 + progress * 1.4;
+      effect.smoke.scale.set(0.7 + progress * 1.5, 0.4 + progress, 0.7 + progress * 1.5);
+      (effect.smoke.material as THREE.MeshBasicMaterial).opacity =
+        Math.sin(progress * Math.PI) * 0.3;
     }
     this.camera.position.copy(this.cameraPosition);
     this.camera.position.x += Math.sin(this.time * 87) * this.trauma * 0.1;
@@ -1358,6 +1570,13 @@ export class World {
     this.muzzle.visible = false;
     this.recoveryRing.visible = false;
     this.bossWarning.visible = false;
+    this.grenade.visible = this.grenadeMarker.visible = false;
+    this.lampMaterial.color.copy(this.lampColor);
+    for (const effect of this.explosions) {
+      effect.life = 0;
+      effect.fresh = false;
+      effect.root.visible = false;
+    }
     this.boss = null;
     for (const model of this.bosses.values()) model.root.visible = false;
     for (const effect of [...this.tracers, ...this.sparks, ...this.coins]) {

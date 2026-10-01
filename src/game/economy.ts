@@ -6,11 +6,12 @@ export interface Progress {
   healthLevel: number;
   reloadLevel: number;
   medkits: number;
+  grenades: number;
   revive: boolean;
   armor: number;
 }
 
-export type ShopItemId = WeaponId | 'health' | 'reload' | 'medkit' | 'revive' | 'armor';
+export type ShopItemId = WeaponId | 'health' | 'reload' | 'medkit' | 'grenade' | 'revive' | 'armor';
 
 export const MAX_COINS = 1_000_000_000;
 const STORAGE_KEY = 'last-line-progress-v1';
@@ -25,6 +26,7 @@ export function createProgress(): Progress {
     healthLevel: 0,
     reloadLevel: 0,
     medkits: 0,
+    grenades: 0,
     revive: false,
     armor: 0,
   };
@@ -49,6 +51,8 @@ export function getPrice(progress: Progress, item: ShopItemId): number | null {
       return UPGRADE_PRICES[progress.reloadLevel] ?? null;
     case 'medkit':
       return progress.medkits < 3 ? 40 : null;
+    case 'grenade':
+      return progress.grenades < 3 ? 60 : null;
     case 'revive':
       return progress.revive ? null : 180;
     case 'armor':
@@ -77,6 +81,9 @@ export function purchase(progress: Progress, item: ShopItemId): boolean {
       break;
     case 'medkit':
       progress.medkits++;
+      break;
+    case 'grenade':
+      progress.grenades++;
       break;
     case 'revive':
       progress.revive = true;
@@ -112,6 +119,7 @@ function isProgress(value: unknown): value is Progress {
       'healthLevel',
       'reloadLevel',
       'medkits',
+      'grenades',
       'revive',
       'armor',
     ])
@@ -126,6 +134,7 @@ function isProgress(value: unknown): value is Progress {
     integerInRange(value.healthLevel, 3) &&
     integerInRange(value.reloadLevel, 3) &&
     integerInRange(value.medkits, 3) &&
+    integerInRange(value.grenades, 3) &&
     typeof value.revive === 'boolean' &&
     integerInRange(value.armor, 60)
   );
@@ -148,10 +157,21 @@ export function loadProgress(storage: Pick<Storage, 'getItem'>): {
       if (
         isRecord(saved) &&
         hasKeys(saved, ['version', 'progress']) &&
-        saved.version === 1 &&
+        saved.version === 2 &&
         isProgress(saved.progress)
       ) {
         return { progress: saved.progress, available: true };
+      }
+      // Preserve existing assets while adding an empty grenade inventory to v1 saves.
+      if (
+        isRecord(saved) &&
+        hasKeys(saved, ['version', 'progress']) &&
+        saved.version === 1 &&
+        isRecord(saved.progress) &&
+        !Object.hasOwn(saved.progress, 'grenades')
+      ) {
+        const migrated = { ...saved.progress, grenades: 0 };
+        if (isProgress(migrated)) return { progress: migrated, available: true };
       }
     } catch {
       // An unreadable save is discarded as a whole, without restoring partial purchases.
@@ -163,7 +183,7 @@ export function loadProgress(storage: Pick<Storage, 'getItem'>): {
 export function saveProgress(storage: Pick<Storage, 'setItem'>, progress: Progress): boolean {
   try {
     if (!isProgress(progress)) return false;
-    storage.setItem(STORAGE_KEY, JSON.stringify({ version: 1, progress }));
+    storage.setItem(STORAGE_KEY, JSON.stringify({ version: 2, progress }));
     return true;
   } catch {
     return false;

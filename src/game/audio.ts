@@ -6,6 +6,7 @@ export class GameAudio {
   private context?: AudioContext;
   private noise?: AudioBuffer;
   private lastCoinSound = -Infinity;
+  private lastDodgeSound = -Infinity;
 
   unlock(): void {
     if (!this.context) {
@@ -32,8 +33,24 @@ export class GameAudio {
         this.tone(context, 410, 140, 0.055, 0.025);
       }
       if (event.type === 'loaded') {
-        this.noiseBurst(context, 0.035, 3200, 0.055);
-        this.tone(context, 620, 260, 0.045, 0.045);
+        this.noiseBurst(context, 0.035, event.weapon === 'shotgun' ? 1700 : 3200, 0.055);
+        this.tone(context, event.weapon === 'shotgun' ? 470 : 620, 260, 0.045, 0.045);
+      }
+      if (event.type === 'grenadeThrown') {
+        this.noiseBurst(context, 0.09, 1200, 0.06);
+        this.tone(context, 720, 310, 0.08, 0.04);
+      }
+      if (event.type === 'explosion') {
+        this.noiseBurst(context, 0.28, 2200, 0.24);
+        this.tone(context, 85, 25, 0.5, 0.2);
+      }
+      if (event.type === 'dodge' && context.currentTime - this.lastDodgeSound > 0.1) {
+        this.noiseBurst(context, 0.06, 4200, 0.035);
+        this.lastDodgeSound = context.currentTime;
+      }
+      if (event.type === 'horde') {
+        this.tone(context, 350, 175, 0.27, 0.075);
+        this.tone(context, 350, 175, 0.27, 0.075, 0.32);
       }
       if (event.type === 'hurt') this.tone(context, 105, 48, 0.2, 0.12);
       if (event.type === 'over') this.tone(context, 160, 28, 0.7, 0.13);
@@ -90,6 +107,7 @@ export class GameAudio {
     if (weapon === 'sniper') {
       this.noiseBurst(context, 0.22, 1900, 0.2);
       this.tone(context, 110, 30, 0.23, 0.18);
+      this.tone(context, 850, 230, 0.085, 0.035);
     } else if (weapon === 'shotgun') {
       this.noiseBurst(context, 0.17, 1600, 0.22);
       this.tone(context, 90, 30, 0.16, 0.18);

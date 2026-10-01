@@ -69,6 +69,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     </div>
     <div class="battle-supplies" id="battle-supplies" hidden>
       <span id="earned-coins">本关 +0 金币</span>
+      <button id="auto-fire" class="supply-button auto-button" aria-label="自动射击" aria-pressed="false" title="自动瞄准与射击 · F">自动射击 <b id="auto-status">关</b><kbd>F</kbd></button>
+      <button id="use-grenade" class="supply-button" title="向瞄准位置投掷手雷 · G">手雷 <b id="grenade-count">0</b><kbd>G</kbd></button>
       <button id="use-medkit" class="supply-button">血包 <b id="medkit-count">0</b><kbd>H</kbd></button>
     </div>
     <div class="reward-toast" id="reward-toast" role="status" aria-live="polite" hidden></div>
@@ -81,13 +83,13 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     <section class="intro" id="intro" aria-labelledby="intro-title">
       <div class="eyebrow"><span></span> HOLD YOUR GROUND</div>
       <h1 id="intro-title">最后<span>防线。</span></h1>
-      <p class="intro-copy">五道防线，两位异变首领。<br>击破弱点，收集金币，升级你的火力。</p>
+      <p class="intro-copy">五道防线，两位异变首领。<br>轮换有限弹药，抵挡尸潮，升级你的火力。</p>
       <div class="intro-rule"></div>
       <div class="control-row"><span class="mouse-icon"></span><span>移动鼠标<span class="control-note">瞄准目标</span></span></div>
       <div class="control-row"><span class="mouse-icon pressed"></span><span>按住左键<span class="control-note">持续开火</span></span></div>
       <div class="control-row keyboard-row"><span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> 切枪</span><span><kbd>R</kbd> 装填</span></div>
       <button class="primary-button" id="start">进入战斗 ${icon('arrow')}</button>
-      <div class="intro-meta"><span>首领弱点</span><i></i><span>金币成长</span><i></i><span>本机保存</span></div>
+      <div class="intro-meta"><span>F 自动射击</span><i></i><span>G 手雷</span><i></i><span>本机保存</span></div>
     </section>
 
     <div class="reticle" id="reticle" hidden><i></i><i></i><i></i><i></i><b></b></div>
@@ -108,7 +110,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <div class="result-grid"><div><span>击杀僵尸</span><strong id="result-kills">0</strong></div><div><span>生存时间</span><strong id="result-time">00:00</strong></div><div><span>命中率</span><strong id="result-accuracy">0%</strong></div></div>
         <button class="primary-button" id="restart">重试本关 ${icon('arrow')}</button>
         <button class="text-button" data-open-shop>前往补给站 · 调整装备</button>
-        <div class="keyboard-hint">或按 <kbd>R</kbd> 重试 · 生命与弹匣补满</div>
+        <div class="keyboard-hint">或按 <kbd>R</kbd> 重试 · 生命与本关弹药补满</div>
       </section>
     </div>
     <div class="modal-wrap" id="clear-panel" hidden>
@@ -121,7 +123,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <button class="text-button" data-open-shop>前往补给站 · 升级与补给</button>
         <button class="primary-button" id="next-level">下一关 ${icon('arrow')}</button>
         <button class="primary-button" id="campaign-restart" hidden>重新出击 ${icon('arrow')}</button>
-        <div class="keyboard-hint" id="supply-note">下一关补满生命与所有弹匣</div>
+        <div class="keyboard-hint" id="supply-note">下一关补满生命、弹匣与备弹 · 道具不返还</div>
       </section>
     </div>
     <div class="modal-wrap shop-wrap" id="shop-panel" hidden>
@@ -145,7 +147,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       ${WEAPON_IDS.map((id, index) => `<button class="weapon-card" id="weapon-${id}" aria-label="${['步枪', '狙击枪', '霰弹枪'][index]}" aria-pressed="${index === 0}" disabled style="--weapon-color:${WEAPONS[id].color}"><span><kbd>${index + 1}</kbd>${WEAPONS[id].name}</span><small>${WEAPONS[id].description}</small><b id="mag-${id}">${WEAPONS[id].magazine}</b></button>`).join('')}
     </div>
     <div class="ammo-panel">
-      <div class="ammo"><strong id="ammo-count">30</strong><span>/ <b id="ammo-capacity">30</b><small>备弹充足</small></span></div>
+      <div class="ammo"><strong id="ammo-count">30</strong><span>/ <b id="ammo-capacity">30</b><small>备弹 <b id="ammo-reserve">60</b></small></span></div>
       <button id="reload" class="reload-button" aria-label="装填弹匣" disabled><span id="reload-label">装填</span><kbd>R</kbd></button>
       <div class="reload-track" role="progressbar" aria-label="装填进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="reload-fill"></i></div>
     </div>
@@ -217,6 +219,12 @@ const shopItems: { id: ShopItemId; name: string; category: string; description: 
     category: '08 / SUPPLY',
     description: '护甲补至 60 · 受伤先消耗护甲',
   },
+  {
+    id: 'grenade',
+    name: '破片手榴弹',
+    category: '09 / SUPPLY',
+    description: 'G 投向准星 · 范围清敌，首领减伤 · 最多 3 枚',
+  },
 ];
 $('shop-grid').innerHTML = shopItems
   .map(
@@ -274,11 +282,13 @@ function updateShop(): void {
         ? `Lv.${level} / 3`
         : id === 'medkit'
           ? `${progress.medkits} / 3`
-          : id === 'revive'
-            ? progress.revive
-              ? '已装备'
-              : '未装备'
-            : `${progress.armor} / 60`;
+          : id === 'grenade'
+            ? `${progress.grenades} / 3`
+            : id === 'revive'
+              ? progress.revive
+                ? '已装备'
+                : '未装备'
+              : `${progress.armor} / 60`;
     $(`shop-price-${id}`).textContent = price === null ? '—' : `${price} ◈`;
     $(`shop-action-${id}`).textContent =
       price === null
@@ -330,6 +340,25 @@ function useMedkit(): void {
   world.handleEvents(events);
   audio.play(events);
   persist();
+  updateUI();
+}
+
+function useGrenade(): void {
+  const aim = simulation.state.autoAim ?? input.aim;
+  const events = simulation.throwGrenade(aim);
+  if (events.length === 0) return;
+  audio.unlock();
+  world.handleEvents(events);
+  audio.play(events);
+  persist();
+  canvas.focus({ preventScroll: true });
+  updateUI();
+}
+
+function toggleAutoFire(): void {
+  clearInput();
+  simulation.setAutoFire(!simulation.state.autoFire);
+  audio.unlock();
   updateUI();
 }
 
@@ -444,6 +473,8 @@ window.addEventListener('keydown', (event) => {
     return;
   }
   if (event.code === 'KeyH') useMedkit();
+  if (event.code === 'KeyG') useGrenade();
+  if (event.code === 'KeyF') toggleAutoFire();
   if (event.code === 'Escape' || event.code === 'KeyP') {
     if (simulation.state.phase === 'playing') pause();
     else if (simulation.state.phase === 'paused') resume();
@@ -463,6 +494,8 @@ $('next-level').addEventListener('click', () => begin('nextLevel'));
 $('campaign-restart').addEventListener('click', () => begin());
 $('reload').addEventListener('click', reload);
 $('use-medkit').addEventListener('click', useMedkit);
+$('use-grenade').addEventListener('click', useGrenade);
+$('auto-fire').addEventListener('click', toggleAutoFire);
 $('open-shop').addEventListener('click', openShop);
 document
   .querySelectorAll('[data-open-shop]')
@@ -513,7 +546,15 @@ function updateUI(): void {
   $<HTMLButtonElement>('open-shop').disabled = !['ready', 'over', 'cleared', 'victory'].includes(
     phase,
   );
-  $('battle-supplies').hidden = phase === 'ready' || cleared || phase === 'over';
+  $('battle-supplies').hidden = cleared || phase === 'over';
+  $('earned-coins').hidden = phase === 'ready';
+  $('use-medkit').hidden = phase === 'ready';
+  $('use-grenade').hidden = phase === 'ready';
+  $('auto-fire').setAttribute('aria-pressed', String(state.autoFire));
+  $('auto-status').textContent = state.autoFire ? '开' : '关';
+  $('grenade-count').textContent = String(state.progress.grenades);
+  $<HTMLButtonElement>('use-grenade').disabled =
+    phase !== 'playing' || state.progress.grenades === 0 || state.grenades.length > 0;
   $('medkit-count').textContent = String(state.progress.medkits);
   $<HTMLButtonElement>('use-medkit').disabled =
     phase !== 'playing' || state.hp >= state.maxHp || state.progress.medkits === 0;
@@ -573,31 +614,48 @@ function updateUI(): void {
   $('remaining').textContent = `剩余 ${total - state.kills} / ${total}`;
   $('level-fill').style.width = `${(state.kills / total) * 100}%`;
   $('wave-status').textContent =
-    state.spawned >= total
-      ? cleared
-        ? '本关敌人已全部清除'
-        : '所有敌人已到达 · 清除剩余目标'
-      : `来袭 ${state.spawned} / ${total} · 后续来敌约 ${Math.max(0, Math.ceil(level.duration - state.elapsed))} 秒`;
+    state.hordeRemaining > 0
+      ? '⚠ 尸潮来袭 · 用霰弹、穿透与手雷压制密集目标'
+      : state.spawned >= total
+        ? cleared
+          ? '本关敌人已全部清除'
+          : '所有敌人已到达 · 清除剩余目标'
+        : `来袭 ${state.spawned} / ${total} · 后续来敌约 ${Math.max(0, Math.ceil(level.duration - state.elapsed))} 秒`;
+  $('wave-status').classList.toggle('horde-warning', state.hordeRemaining > 0);
   $('enemy-intel').textContent = [
     '游荡者 · 普通目标',
-    '疾行者 · 血少速度快',
+    '疾行者 · 快速接近，受击易僵直',
     '重甲巨兽 · 狙击克制',
-    '潜行者 · 身小难瞄准',
+    '潜行者 · 可能闪避，范围火力压制',
     '孵化主宰 · 逐个击破弱点',
   ][state.level - 1];
   for (const id of WEAPON_IDS) {
     $<HTMLButtonElement>(`weapon-${id}`).disabled = phase !== 'playing';
     $(`weapon-${id}`).setAttribute('aria-pressed', String(state.weapon === id));
     $(`mag-${id}`).textContent =
-      `${state.ammo[id]} / ${WEAPONS[id].magazine} · Lv.${state.progress.weapons[id]}`;
+      `${state.ammo[id]} + ${state.reserve[id]} · Lv.${state.progress.weapons[id]}`;
+    $(`weapon-${id}`).classList.toggle('depleted', state.ammo[id] + state.reserve[id] === 0);
   }
   $('ammo-count').textContent = String(state.ammo[state.weapon]);
   $('ammo-count').classList.toggle('empty', state.ammo[state.weapon] === 0);
   $('ammo-capacity').textContent = String(weapon.magazine);
+  $('ammo-reserve').textContent = String(state.reserve[state.weapon]);
+  const exhausted = WEAPON_IDS.every((id) => state.ammo[id] + state.reserve[id] === 0);
+  if (exhausted && phase === 'playing') {
+    $('status').textContent = '弹药耗尽';
+    $('wave-status').textContent = '三枪弹药耗尽 · 使用手雷或暂停重试本关';
+  }
   $('reload-label').textContent =
-    state.reloadRemaining > 0 ? `装填 ${state.reloadRemaining.toFixed(1)}s` : '装填';
+    state.reloadRemaining > 0
+      ? `${weapon.reloadType === 'round' ? '装入一发' : '装填'} ${state.reloadRemaining.toFixed(1)}s`
+      : state.reserve[state.weapon] === 0
+        ? '无备弹'
+        : weapon.reloadType === 'round'
+          ? '逐发装填'
+          : '装填';
   $<HTMLButtonElement>('reload').disabled =
     phase !== 'playing' ||
+    state.reserve[state.weapon] === 0 ||
     state.reloadRemaining > 0 ||
     state.ammo[state.weapon] === weapon.magazine;
   const reloadProgress =
@@ -693,7 +751,18 @@ function frame(now: number): void {
   damageTime = Math.max(0, damageTime - dt);
   $('damage').style.opacity = String(damageTime / 0.35);
   // Keep newly emitted flashes visible for at least one rendered frame.
-  world.render(simulation.state, input.aim, phase === 'paused' ? 0 : Math.min(dt, 0.05));
+  const renderAim = simulation.state.autoFire ? (simulation.state.autoAim ?? input.aim) : input.aim;
+  if (simulation.state.autoFire) {
+    const reticle = $('reticle');
+    reticle.hidden = simulation.state.phase !== 'playing' || simulation.state.autoAim === null;
+    if (!reticle.hidden) {
+      const bounds = canvas.getBoundingClientRect();
+      const projected = world.project(renderAim);
+      reticle.style.left = `${projected.x - bounds.left}px`;
+      reticle.style.top = `${projected.y - bounds.top}px`;
+    }
+  }
+  world.render(simulation.state, renderAim, phase === 'paused' ? 0 : Math.min(dt, 0.05));
   uiAccumulator += dt;
   if (uiAccumulator >= 0.1 || phase !== simulation.state.phase) {
     updateUI();
