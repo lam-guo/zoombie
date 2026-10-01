@@ -407,6 +407,16 @@ test('clear level one, advance to level two, and retry that level after defeat',
     await page.mouse.up();
   }
   await expect(page.getByRole('dialog', { name: '关卡完成' })).toBeVisible();
+  await page.setViewportSize({ width: 1280, height: 720 });
+  const clearPanel = page.getByRole('dialog', { name: '关卡完成' });
+  const modalBounds = await clearPanel.boundingBox();
+  const arenaBounds = await page.locator('#arena').boundingBox();
+  expect(modalBounds!.y).toBeGreaterThanOrEqual(arenaBounds!.y);
+  expect(modalBounds!.y + modalBounds!.height).toBeLessThanOrEqual(
+    arenaBounds!.y + arenaBounds!.height,
+  );
+  await page.locator('#next-level').scrollIntoViewIfNeeded();
+  await expect(page.locator('#next-level')).toBeInViewport();
   const cleared = await snapshot(page);
   expect(cleared.kills).toBe(levelTotal(LEVELS[0]));
   expect(cleared.spawned).toBe(levelTotal(LEVELS[0]));

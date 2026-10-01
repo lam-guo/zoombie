@@ -5,6 +5,7 @@ export class GameAudio {
   muted = false;
   private context?: AudioContext;
   private noise?: AudioBuffer;
+  private lastCoinSound = -Infinity;
 
   unlock(): void {
     if (!this.context) {
@@ -36,6 +37,22 @@ export class GameAudio {
       }
       if (event.type === 'hurt') this.tone(context, 105, 48, 0.2, 0.12);
       if (event.type === 'over') this.tone(context, 160, 28, 0.7, 0.13);
+      if (event.type === 'coins' && context.currentTime - this.lastCoinSound > 0.08) {
+        this.tone(context, 880, 1174, 0.065, 0.03);
+        this.lastCoinSound = context.currentTime;
+      }
+      if (event.type === 'bossWarning') {
+        this.tone(context, 170, 245, 0.3, 0.09);
+        this.tone(context, 170, 280, 0.3, 0.09, 0.4);
+      }
+      if (event.type === 'bossBreak') {
+        this.noiseBurst(context, 0.18, 2100, 0.13);
+        this.tone(context, 230, 55, 0.22, 0.1);
+      }
+      if (event.type === 'heal' || event.type === 'revive') {
+        this.tone(context, 330, 660, 0.22, 0.07);
+        if (event.type === 'revive') this.tone(context, 494, 988, 0.35, 0.07, 0.16);
+      }
       if (event.type === 'clear') {
         this.tone(context, 392, 392, 0.18, 0.065);
         this.tone(context, 494, 494, 0.18, 0.065, 0.13);
